@@ -166,7 +166,10 @@ class SheetsDB {
   headers(){return{'Authorization':`Bearer ${this.token}`,'Content-Type':'application/json'}}
 
   async getAll(){
-    const r=await fetch(`${this.base}/values/${SHEET_NAME}!A:F`,{headers:this.headers()});
+    // valueRenderOption=FORMATTED_VALUE garante que datas vêm como string formatada pela célula
+    // (ex: "01/10/2025") em vez de serial number, independente da formatação da célula.
+    // dateTimeRenderOption não é necessário com FORMATTED_VALUE mas reforça o comportamento.
+    const r=await fetch(`${this.base}/values/${SHEET_NAME}!A:F?valueRenderOption=FORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`,{headers:this.headers()});
     if(!r.ok)throw new Error(await r.text());
     const d=await r.json();
     const rows=d.values||[];
@@ -367,25 +370,51 @@ function parseValor(v){
   return parseFloat(clean)||0;
 }
 function normalizeDate(d){
-  if(!d)return'';
+  if(d===null||d===undefined||d==='')return'';
   const s=String(d).trim();
-  // Excel serial number (ex: 45678)
-  if(/^\d{5}$/.test(s)){
+  if(!s)return'';
+  // Excel serial number (4-5 digits, ex: 45678)
+  if(/^\d{4,5}$/.test(s)){
     const date=new Date((parseInt(s)-25569)*86400*1000);
-    return date.toISOString().slice(0,10);
+    if(!isNaN(date.getTime()))return date.toISOString().slice(0,10);
   }
-  // DD/MM/YYYY — validar que mês está entre 01-12
-  if(/^\d{2}\/\d{2}\/\d{4}$/.test(s)){
+  // DD/MM/YYYY ou D/M/YYYY
+  if(/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)){
     const[dd,mm,yyyy]=s.split('/');
     const mi=parseInt(mm,10);
     const di=parseInt(dd,10);
     if(mi>=1&&mi<=12&&di>=1&&di<=31){
-      return`${yyyy}-${mm.padStart(2,'0')}-${dd.padStart(2,'0')}`;
+      return`${yyyy}-${String(mi).padStart(2,'0')}-${String(di).padStart(2,'0')}`;
     }
-    return'';
   }
-  // Already YYYY-MM-DD
+  // DD/MM/YY (ano com 2 dígitos)
+  if(/^\d{1,2}\/\d{1,2}\/\d{2}$/.test(s)){
+    const[dd,mm,yy]=s.split('/');
+    const mi=parseInt(mm,10);
+    const di=parseInt(dd,10);
+    const yi=parseInt(yy,10);
+    if(mi>=1&&mi<=12&&di>=1&&di<=31){
+      const yyyy=yi<50?2000+yi:1900+yi;
+      return`${yyyy}-${String(mi).padStart(2,'0')}-${String(di).padStart(2,'0')}`;
+    }
+  }
+  // Already YYYY-MM-DD (ISO)
   if(/^\d{4}-\d{2}-\d{2}/.test(s))return s.slice(0,10);
+  // YYYY/MM/DD (variante)
+  if(/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(s)){
+    const[yyyy,mm,dd]=s.split('/');
+    const mi=parseInt(mm,10);
+    const di=parseInt(dd,10);
+    if(mi>=1&&mi<=12&&di>=1&&di<=31){
+      return`${yyyy}-${String(mi).padStart(2,'0')}-${String(di).padStart(2,'0')}`;
+    }
+  }
+  // Tenta parsear como Date nativo (último recurso, ex: "2025-01-15T10:00:00Z")
+  const fallback=new Date(s);
+  if(!isNaN(fallback.getTime())){
+    return fallback.toISOString().slice(0,10);
+  }
+  // Devolve a string original — melhor do que descartar silenciosamente o lançamento
   return s;
 }
 function parseHist(raw){return raw.map((r,i)=>({_row:i+2,date:normalizeDate(r[0]),desc:r[1]||'',valor:parseValor(r[2]),categoria:r[3]||'',deQuem:r[4]||'',quemPagou:r[5]||''}))}
@@ -486,39 +515,55 @@ function formatDateForDisplay(isoDate){
   return`${dd}/${mm}/${yyyy}`;
 }
 function toMk(d){
-  if(!d||typeof d!=='string')return'';
-  const s=d.trim();
-  // Excel serial number (5 digits)
-  if(/^\d{5}$/.test(s)){
+  if(d===null||d===undefined||d==='')return'';
+  const s=String(d).trim();
+  if(!s)return'';
+  // Excel serial number (4-5 digits)
+  if(/^\d{4,5}$/.test(s)){
     const date=new Date((parseInt(s)-25569)*86400*1000);
-    return date.toISOString().slice(0,7);
+    if(!isNaN(date.getTime()))return date.toISOString().slice(0,7);
   }
-  // DD/MM/YYYY — extrair dia, mês, ano com validação
-  if(/^\d{2}\/\d{2}\/\d{4}$/.test(s)){
-    const[dd,mm,yyyy]=s.split('/');
-    const mi=parseInt(mm,10);
-    const yi=parseInt(yyyy,10);
-    if(mi>=1&&mi<=12&&yi>=2000&&yi<=2099){
-      return`${yyyy}-${mm.padStart(2,'0')}`;
-    }
-    return'';
-  }
-  // YYYY-MM-DD (ISO)
+  // YYYY-MM-DD ou YYYY-MM-DDTHH:MM:SS (ISO)
   if(/^\d{4}-\d{2}-\d{2}/.test(s)){
     const mk=s.slice(0,7);
-    const[y,m]=mk.split('-');
-    const mi=parseInt(m,10);
-    const yi=parseInt(y,10);
-    if(mi>=1&&mi<=12&&yi>=2000&&yi<=2099)return mk;
-    return'';
+    const m=parseInt(mk.slice(5,7),10);
+    if(m>=1&&m<=12)return mk;
   }
-  // YYYY-MM
+  // DD/MM/YYYY ou D/M/YYYY
+  if(/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(s)){
+    const[dd,mm,yyyy]=s.split('/');
+    const mi=parseInt(mm,10);
+    if(mi>=1&&mi<=12){
+      return`${yyyy}-${String(mi).padStart(2,'0')}`;
+    }
+  }
+  // DD/MM/YY
+  if(/^\d{1,2}\/\d{1,2}\/\d{2}$/.test(s)){
+    const[dd,mm,yy]=s.split('/');
+    const mi=parseInt(mm,10);
+    const yi=parseInt(yy,10);
+    if(mi>=1&&mi<=12){
+      const yyyy=yi<50?2000+yi:1900+yi;
+      return`${yyyy}-${String(mi).padStart(2,'0')}`;
+    }
+  }
+  // YYYY-MM (já é a chave)
   if(/^\d{4}-\d{2}$/.test(s)){
-    const[y,m]=s.split('-');
-    const mi=parseInt(m,10);
-    const yi=parseInt(y,10);
-    if(mi>=1&&mi<=12&&yi>=2000&&yi<=2099)return s;
-    return'';
+    const m=parseInt(s.slice(5,7),10);
+    if(m>=1&&m<=12)return s;
+  }
+  // YYYY/MM/DD
+  if(/^\d{4}\/\d{1,2}\/\d{1,2}$/.test(s)){
+    const[yyyy,mm]=s.split('/');
+    const mi=parseInt(mm,10);
+    if(mi>=1&&mi<=12){
+      return`${yyyy}-${String(mi).padStart(2,'0')}`;
+    }
+  }
+  // Último recurso: tentar Date nativo
+  const fallback=new Date(s);
+  if(!isNaN(fallback.getTime())){
+    return fallback.toISOString().slice(0,7);
   }
   return'';
 }
@@ -1949,7 +1994,11 @@ function Historico({data,pessoa:defaultPessoa,onEdit,onRefresh,syncStatus}){
   const allMs=[...new Set(data.map(r=>toMk(r.date)))].filter(m=>m&&/^\d{4}-\d{2}$/.test(m)&&m>='2025-01').sort().reverse();
 
   const filtered=useMemo(()=>{
-    let rows=data.filter(r=>r.date>='2025-01-01');
+    // Filtra apenas lançamentos cujo mês foi reconhecido E é >= 2025-01
+    let rows=data.filter(r=>{
+      const mk=toMk(r.date);
+      return mk&&mk>='2025-01';
+    });
     if(pessoa==='Lindito')rows=rows.filter(r=>r.deQuem==='Lindito'||r.deQuem==='Conjunto');
     else if(pessoa==='Mozicho')rows=rows.filter(r=>r.deQuem==='Mozicho'||r.deQuem==='Conjunto');
     // Aplica filtro de mês só se algum estiver selecionado
@@ -1972,7 +2021,8 @@ function Historico({data,pessoa:defaultPessoa,onEdit,onRefresh,syncStatus}){
   const allProdutos=useMemo(()=>{
     const prods=new Map();
     for(const r of data){
-      if(r.date>='2025-01-01'){
+      const mk=toMk(r.date);
+      if(mk&&mk>='2025-01'){
         const key=r.desc.toLowerCase();
         if(!prods.has(key)){
           prods.set(key,{desc:r.desc,history:[]});
@@ -2542,6 +2592,39 @@ function App(){
             <div style={{fontSize:13,color:'var(--text2)',lineHeight:2}}>
               <div>📊 {data.length} lançamentos carregados da planilha</div>
               <div>🔄 Sync: <span style={{color:syncStatus==='ok'?'var(--green)':syncStatus==='syncing'?'var(--accent)':'var(--text3)',fontWeight:700}}>{syncStatus==='ok'?'OK':syncStatus==='syncing'?'Sincronizando...':'Não conectado'}</span></div>
+              {(()=>{
+                // Diagnóstico: detectar lançamentos com data não reconhecida
+                const problemRows=data.filter(r=>{
+                  const mk=toMk(r.date);
+                  return !mk||!/^\d{4}-\d{2}$/.test(mk);
+                });
+                const sample=data.slice(0,3).map(r=>r.date).filter(Boolean);
+                return(
+                  <>
+                    {problemRows.length>0&&(
+                      <div style={{marginTop:8,padding:'10px 12px',background:'var(--moz-bg)',borderRadius:10,fontSize:11,color:'var(--moz)',lineHeight:1.5}}>
+                        <strong>⚠️ {problemRows.length} lançamento(s) com data não reconhecida:</strong>
+                        <div style={{marginTop:4,fontFamily:'monospace',fontSize:10,color:'var(--text2)'}}>
+                          {problemRows.slice(0,5).map((r,i)=>(
+                            <div key={i}>Linha {r._row}: "{String(r.date)}" — {r.desc}</div>
+                          ))}
+                          {problemRows.length>5&&<div>...e mais {problemRows.length-5}</div>}
+                        </div>
+                      </div>
+                    )}
+                    {sample.length>0&&(
+                      <div style={{marginTop:8,padding:'8px 12px',background:'var(--bg3)',borderRadius:10,fontSize:11,color:'var(--text2)',lineHeight:1.5}}>
+                        <strong>🔍 Formato de data lido:</strong>
+                        <div style={{marginTop:2,fontFamily:'monospace',fontSize:10}}>
+                          {sample.map((d,i)=>(
+                            <div key={i}>"{String(d)}" → mês {toMk(d)||'(inválido)'}</div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           </div>
         </div>
