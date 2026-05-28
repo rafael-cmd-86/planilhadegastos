@@ -369,15 +369,20 @@ function parseValor(v){
 function normalizeDate(d){
   if(!d)return'';
   const s=String(d).trim();
-  // Excel serial number
+  // Excel serial number (ex: 45678)
   if(/^\d{5}$/.test(s)){
     const date=new Date((parseInt(s)-25569)*86400*1000);
     return date.toISOString().slice(0,10);
   }
-  // DD/MM/YYYY
+  // DD/MM/YYYY — validar que mês está entre 01-12
   if(/^\d{2}\/\d{2}\/\d{4}$/.test(s)){
     const[dd,mm,yyyy]=s.split('/');
-    return`${yyyy}-${mm}-${dd}`;
+    const mi=parseInt(mm,10);
+    const di=parseInt(dd,10);
+    if(mi>=1&&mi<=12&&di>=1&&di<=31){
+      return`${yyyy}-${mm.padStart(2,'0')}-${dd.padStart(2,'0')}`;
+    }
+    return'';
   }
   // Already YYYY-MM-DD
   if(/^\d{4}-\d{2}-\d{2}/.test(s))return s.slice(0,10);
@@ -387,6 +392,16 @@ function parseHist(raw){return raw.map((r,i)=>({_row:i+2,date:normalizeDate(r[0]
 function fmt(v){return'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})}
 function fmtK(v){return v>=1000?'R$ '+(v/1000).toLocaleString('pt-BR',{minimumFractionDigits:1,maximumFractionDigits:1})+'k':'R$ '+Math.round(v).toLocaleString('pt-BR')}
 function mlabel(k){
+  if(!k||typeof k!=='string')return'';
+  const parts=k.split('-');
+  if(parts.length<2)return k;
+  const [y,m]=parts;
+  const months=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  const mi=parseInt(m,10)-1;
+  if(mi<0||mi>11)return k;
+  return months[mi]+' '+y;
+}
+function mlabelShort(k){
   if(!k||typeof k!=='string')return'';
   const parts=k.split('-');
   if(parts.length<2)return k;
@@ -472,21 +487,40 @@ function formatDateForDisplay(isoDate){
 }
 function toMk(d){
   if(!d||typeof d!=='string')return'';
-  // Handle Excel serial dates (numbers) or DD/MM/YYYY or YYYY-MM-DD
-  if(/^\d{5}$/.test(d.trim())){
-    // Excel serial
-    const date=new Date((parseInt(d)-25569)*86400*1000);
+  const s=d.trim();
+  // Excel serial number (5 digits)
+  if(/^\d{5}$/.test(s)){
+    const date=new Date((parseInt(s)-25569)*86400*1000);
     return date.toISOString().slice(0,7);
   }
-  if(d.includes('/')){
-    // DD/MM/YYYY format from Sheets
-    const parts=d.split('/');
-    if(parts.length===3){
-      const [dd,mm,yyyy]=parts;
+  // DD/MM/YYYY — extrair dia, mês, ano com validação
+  if(/^\d{2}\/\d{2}\/\d{4}$/.test(s)){
+    const[dd,mm,yyyy]=s.split('/');
+    const mi=parseInt(mm,10);
+    const yi=parseInt(yyyy,10);
+    if(mi>=1&&mi<=12&&yi>=2000&&yi<=2099){
       return`${yyyy}-${mm.padStart(2,'0')}`;
     }
+    return'';
   }
-  return d.slice(0,7);
+  // YYYY-MM-DD (ISO)
+  if(/^\d{4}-\d{2}-\d{2}/.test(s)){
+    const mk=s.slice(0,7);
+    const[y,m]=mk.split('-');
+    const mi=parseInt(m,10);
+    const yi=parseInt(y,10);
+    if(mi>=1&&mi<=12&&yi>=2000&&yi<=2099)return mk;
+    return'';
+  }
+  // YYYY-MM
+  if(/^\d{4}-\d{2}$/.test(s)){
+    const[y,m]=s.split('-');
+    const mi=parseInt(m,10);
+    const yi=parseInt(y,10);
+    if(mi>=1&&mi<=12&&yi>=2000&&yi<=2099)return s;
+    return'';
+  }
+  return'';
 }
 
 function calcDebt(rows){
@@ -713,6 +747,9 @@ function SetupScreen({onDone}){
         <div style={{background:'var(--conj-bg)',border:'1.5px solid var(--conj-border)',borderRadius:12,padding:12,marginBottom:20,fontSize:12,color:'var(--text2)'}}>
           <strong style={{color:'var(--conj)'}}>📋 Estrutura da planilha:</strong> A aba precisa se chamar <strong>"Base de dados"</strong> com colunas: Data | Descrição | Valor | Categoria | De quem? | Quem pagou?<br/>
           <span style={{marginTop:4,display:'block'}}>A aba <strong>"Orçamentos"</strong> será criada automaticamente para salvar os orçamentos mensais.</span>
+        </div>
+        <div style={{background:'var(--bg3)',border:'1.5px solid var(--border2)',borderRadius:12,padding:12,marginBottom:20,fontSize:12,color:'var(--text2)'}}>
+          <strong style={{color:'var(--amber)'}}>🔒 Segurança:</strong> O Client ID OAuth e o ID da planilha ficam salvos localmente no seu dispositivo (localStorage). <strong style={{color:'var(--text)'}}>Nenhum dado financeiro é armazenado no app</strong> — tudo fica na sua planilha Google Sheets protegida pela sua conta Google. O token de acesso existe apenas enquanto o app está aberto e nunca é gravado no disco.
         </div>
         <button onClick={save} disabled={!clientId||!sheetId}
           style={{width:'100%',padding:'15px',background:'var(--accent)',color:'#fff',borderRadius:14,fontSize:15,fontWeight:700,opacity:clientId&&sheetId?1:0.4}}>
@@ -1323,7 +1360,7 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
   const [showBudget,setShowBudget]=useState(false);
   const [catFilter,setCatFilter]=useState(null); // categoria selecionada no donut
   const [trendCat,setTrendCat]=useState('all'); // categoria do gráfico de histórico
-  const allMs=[...new Set(data.map(r=>toMk(r.date)))].sort().filter(m=>m>='2025-01').reverse();
+  const allMs=[...new Set(data.map(r=>toMk(r.date)))].filter(m=>m&&/^\d{4}-\d{2}$/.test(m)&&m>='2025-01').sort().reverse();
   const rows=data.filter(r=>toMk(r.date)===selM);
   const monthBudget=budgetData[selM]||{budgets:{Lindito:0,Mozicho:0},extras:[]};
   const baseBudget=pessoa==='Conjunto'?(monthBudget.budgets.Lindito+monthBudget.budgets.Mozicho):(monthBudget.budgets[pessoa]||0);
@@ -1698,7 +1735,7 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
                 if(!showLabel)return null;
                 return(
                   <text key={`l${i}`} x={p.x} y={h-6} textAnchor="middle" fontSize="9" fill="var(--text2)" fontFamily="Plus Jakarta Sans">
-                    {mlabel(p.p.m).slice(0,3)}
+                    {mlabelShort(p.p.m)}
                   </text>
                 );
               })}
@@ -1785,7 +1822,7 @@ function OrcamentoModal({onClose,budgets,extras,onSave,monthKey,hasSheetsSync}){
 // ── Saldos Screen ─────────────────────────────────────────────────────────────
 function Saldos({data,onQuit,onRefresh,syncStatus}){
   const [selM,setSelM]=useState('all');
-  const allMs=[...new Set(data.map(r=>toMk(r.date)))].sort().filter(m=>m>='2025-01');
+  const allMs=[...new Set(data.map(r=>toMk(r.date)))].filter(m=>m&&/^\d{4}-\d{2}$/.test(m)&&m>='2025-01').sort();
   const filteredRows=selM==='all'?data:data.filter(r=>toMk(r.date)===selM);
   const debt=calcDebt(filteredRows);
   const quites=Math.abs(debt.net)<0.01;
@@ -1909,7 +1946,7 @@ function Historico({data,pessoa:defaultPessoa,onEdit,onRefresh,syncStatus}){
   const [pageSize,setPageSize]=useState(100);
   const [filterProduto,setFilterProduto]=useState(''); // Filtro de produto/descrição para gráfico de preço
   const [showPriceChart,setShowPriceChart]=useState(false);
-  const allMs=[...new Set(data.map(r=>toMk(r.date)))].sort().filter(m=>m>='2025-01').reverse();
+  const allMs=[...new Set(data.map(r=>toMk(r.date)))].filter(m=>m&&/^\d{4}-\d{2}$/.test(m)&&m>='2025-01').sort().reverse();
 
   const filtered=useMemo(()=>{
     let rows=data.filter(r=>r.date>='2025-01-01');
@@ -2323,10 +2360,20 @@ function App(){
         await db.append(item);
         okCount++;
       }
-      await syncFromSheets();
+      // Força re-leitura da planilha para garantir que o novo lançamento aparece
+      const sheetRows=await db.getAll();
+      setData([...sheetRows]); // spread garante nova referência e re-render
+      setSyncStatus('ok');
       showToast(entries.length>1?`💳 ${okCount} lançamentos salvos na planilha!`:'💾 Salvo no Google Sheets!');
     }catch(e){
-      await syncFromSheets();
+      // Mesmo com erro no append, tenta recarregar o que já está na planilha
+      try{
+        const sheetRows=await db.getAll();
+        setData([...sheetRows]);
+        setSyncStatus('ok');
+      }catch{
+        setSyncStatus('error');
+      }
       showToast(okCount>0?`${okCount} salvo(s); ocorreu erro nos demais. Revise a planilha.`:'Não foi possível salvar na planilha.','err');
     }
   }
@@ -2340,10 +2387,13 @@ function App(){
     setSyncStatus('syncing');
     try{
       await db.update(entry._row,updated);
-      await syncFromSheets();
+      const sheetRows=await db.getAll();
+      setData([...sheetRows]);
+      setSyncStatus('ok');
       showToast('✓ Atualizado na planilha!');
     }catch(e){
       showToast('Erro ao atualizar na planilha.','err');
+      setSyncStatus('error');
     }
     setEditEntry(null);
   }
@@ -2358,10 +2408,13 @@ function App(){
     setSyncStatus('syncing');
     try{
       await db.delete(entry._row);
-      await syncFromSheets();
+      const sheetRows=await db.getAll();
+      setData([...sheetRows]);
+      setSyncStatus('ok');
       showToast('🗑️ Excluído da planilha!');
     }catch(e){
       showToast('Erro ao excluir na planilha.','err');
+      setSyncStatus('error');
     }
     setEditEntry(null);
   }
