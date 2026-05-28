@@ -442,6 +442,49 @@ function mlabelShort(k){
 }
 function today(){return new Date().toISOString().slice(0,10)}
 
+// Retorna a chave do mês atual (YYYY-MM)
+function currentMk(){return today().slice(0,7);}
+
+// Gera sequência contínua de meses entre dois YYYY-MM (inclusive), preenchendo lacunas
+function monthRange(startMk,endMk){
+  if(!startMk||!endMk)return[];
+  const out=[];
+  let [y,m]=startMk.split('-').map(Number);
+  const [ey,em]=endMk.split('-').map(Number);
+  // Limite de segurança: máximo 120 meses
+  let guard=0;
+  while((y<ey||(y===ey&&m<=em))&&guard<120){
+    out.push(`${y}-${String(m).padStart(2,'0')}`);
+    m++;
+    if(m>12){m=1;y++;}
+    guard++;
+  }
+  return out;
+}
+
+// Adiciona n meses a uma chave YYYY-MM
+function addMonths(mk,n){
+  let [y,m]=mk.split('-').map(Number);
+  m+=n;
+  while(m>12){m-=12;y++;}
+  while(m<1){m+=12;y--;}
+  return `${y}-${String(m).padStart(2,'0')}`;
+}
+
+// Regressão linear simples (mínimos quadrados) sobre pontos [{x,y}]
+// Retorna {slope, intercept, predict(x)}
+function linearRegression(pts){
+  const n=pts.length;
+  if(n<2)return{slope:0,intercept:n===1?pts[0].y:0,predict:()=>n===1?pts[0].y:0};
+  let sx=0,sy=0,sxy=0,sxx=0;
+  for(const p of pts){sx+=p.x;sy+=p.y;sxy+=p.x*p.y;sxx+=p.x*p.x;}
+  const denom=n*sxx-sx*sx;
+  if(denom===0){const avg=sy/n;return{slope:0,intercept:avg,predict:()=>avg};}
+  const slope=(n*sxy-sx*sy)/denom;
+  const intercept=(sy-slope*sx)/n;
+  return{slope,intercept,predict:x=>slope*x+intercept};
+}
+
 // Avalia expressão tipo "100-15" ou "50*0.9+10" sem usar eval()
 function evalCalcExpr(expr){
   if(expr==null)return 0;
@@ -1405,6 +1448,8 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
   const [showBudget,setShowBudget]=useState(false);
   const [catFilter,setCatFilter]=useState(null); // categoria selecionada no donut
   const [trendCat,setTrendCat]=useState('all'); // categoria do gráfico de histórico
+  const [trendRange,setTrendRange]=useState(12); // período do gráfico: 6, 12 ou 'all'
+  const [showProjection,setShowProjection]=useState(true); // mostrar linha de projeção/tendência
   const allMs=[...new Set(data.map(r=>toMk(r.date)))].filter(m=>m&&/^\d{4}-\d{2}$/.test(m)&&m>='2025-01').sort().reverse();
   const rows=data.filter(r=>toMk(r.date)===selM);
   const monthBudget=budgetData[selM]||{budgets:{Lindito:0,Mozicho:0},extras:[]};
@@ -1709,12 +1754,18 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
         );
       })()}
 
-      {/* Histórico por categoria — mini line chart */}
+      {/* Histórico por categoria — mini line chart com projeção */}
       {(()=>{
-        const monthList=allMs.slice(0,12).reverse(); // últimos 12 meses cronológicos
-        if(monthList.length<2)return null;
-        // Para cada mês, soma do filtro (categoria ou todas)
-        const dataPts=monthList.map(m=>{
+        const nowMk=currentMk();
+        // Meses com dados reais (cronológico, do mais antigo ao mais recente), só até o mês atual
+        const realMonths=allMs.filter(m=>m<=nowMk).slice().reverse();
+        if(realMonths.length<2)return null;
+
+        // Define janela conforme período escolhido
+        const windowMonths=trendRange==='all'?realMonths:realMonths.slice(-trendRange);
+
+        // Soma por mês conforme filtro de categoria e pessoa
+        const sumForMonth=(m)=>{
           const r=data.filter(rr=>toMk(rr.date)===m&&!NON_GASTO.has(rr.categoria));
           const filt=trendCat==='all'?r:r.filter(rr=>rr.categoria===trendCat);
           let total=0;
@@ -1723,22 +1774,48 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
             else if(rr.deQuem===pessoa)total+=rr.valor;
             else if(rr.deQuem==='Conjunto')total+=rr.valor/2;
           }
-          return{m,total};
-        });
-        const max=Math.max(...dataPts.map(p=>p.total),1);
-        const w=300,h=110,padL=8,padR=8,padT=10,padB=22;
+          return total;
+        };
+
+        const dataPts=windowMonths.map((m,i)=>({m,total:sumForMonth(m),idx:i,real:true}));
+
+        // Regressão linear sobre os meses reais para projetar os próximos 2 meses
+        const reg=linearRegression(dataPts.map(p=>({x:p.idx,y:p.total})));
+        const projPts=[];
+        if(showProjection&&dataPts.length>=3){
+          const lastIdx=dataPts.length-1;
+          for(let k=1;k<=2;k++){
+            const idx=lastIdx+k;
+            const projVal=Math.max(0,reg.predict(idx));
+            projPts.push({m:addMonths(windowMonths[windowMonths.length-1],k),total:projVal,idx,real:false});
+          }
+        }
+
+        const allPts=[...dataPts,...projPts];
+        const max=Math.max(...allPts.map(p=>p.total),1);
+        const w=320,h=130,padL=10,padR=10,padT=12,padB=26;
         const plotW=w-padL-padR,plotH=h-padT-padB;
         const linecol=trendCat==='all'?'var(--accent)':getCatColor(trendCat);
-        const points=dataPts.map((p,i)=>{
-          const x=padL+(dataPts.length===1?plotW/2:(i/(dataPts.length-1))*plotW);
-          const y=padT+plotH-(p.total/max)*plotH;
-          return{x,y,p};
-        });
+        const xFor=(idx)=>padL+(allPts.length===1?plotW/2:(idx/(allPts.length-1))*plotW);
+        const yFor=(val)=>padT+plotH-(val/max)*plotH;
+
+        const realScreenPts=dataPts.map(p=>({x:xFor(p.idx),y:yFor(p.total),p}));
+        const projScreenPts=projPts.map(p=>({x:xFor(p.idx),y:yFor(p.total),p}));
+
+        // Estatísticas
+        const totalPeriodo=dataPts.reduce((s,p)=>s+p.total,0);
+        const mediaMensal=totalPeriodo/dataPts.length;
+        const ultimoMes=dataPts[dataPts.length-1].total;
+        const penultimo=dataPts.length>=2?dataPts[dataPts.length-2].total:0;
+        const variacaoMoM=penultimo>0?((ultimoMes-penultimo)/penultimo*100):0;
+        const tendenciaTexto=reg.slope>mediaMensal*0.05?'📈 crescente':reg.slope<-mediaMensal*0.05?'📉 decrescente':'➡️ estável';
+        const projProximoMes=projPts.length>0?projPts[0].total:null;
+
         return(
           <div className="card" style={{marginBottom:12,padding:'16px 14px'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
               <div style={{fontSize:11,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'0.08em'}}>
-                📈 Tendência · 12 meses
+                📈 Tendência {tendenciaTexto}
               </div>
               <div style={{position:'relative'}}>
                 <select value={trendCat} onChange={e=>setTrendCat(e.target.value)} style={{
@@ -1754,39 +1831,94 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
                 <span style={{position:'absolute',right:8,top:'50%',transform:'translateY(-50%)',pointerEvents:'none',fontSize:8,color:linecol}}>▼</span>
               </div>
             </div>
-            <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+
+            {/* Seletor de período */}
+            <div style={{display:'flex',gap:6,marginBottom:12}}>
+              {[[6,'6 meses'],[12,'12 meses'],['all','Tudo']].map(([val,lbl])=>(
+                <button key={val} onClick={()=>setTrendRange(val)} style={{
+                  flex:1,padding:'6px 4px',borderRadius:8,fontSize:11,fontWeight:700,
+                  background:trendRange===val?linecol:'var(--bg3)',
+                  color:trendRange===val?'#fff':'var(--text2)',
+                  border:`1px solid ${trendRange===val?linecol:'var(--border)'}`
+                }}>{lbl}</button>
+              ))}
+              <button onClick={()=>setShowProjection(s=>!s)} style={{
+                flex:1.2,padding:'6px 4px',borderRadius:8,fontSize:11,fontWeight:700,
+                background:showProjection?'var(--accent-bg)':'var(--bg3)',
+                color:showProjection?'var(--accent)':'var(--text3)',
+                border:`1px solid ${showProjection?'var(--accent)':'var(--border)'}`
+              }}>{showProjection?'🔮 Projeção ON':'🔮 Projeção OFF'}</button>
+            </div>
+
+            <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`}>
               {/* Linha de grade no zero */}
               <line x1={padL} y1={padT+plotH} x2={w-padR} y2={padT+plotH} stroke="var(--border)" strokeWidth="1"/>
-              {/* Área */}
-              {points.length>1&&(
-                <path d={`M${points[0].x} ${padT+plotH}${points.map(p=>` L${p.x} ${p.y}`).join('')}L${points[points.length-1].x} ${padT+plotH}Z`}
+              {/* Linha de média */}
+              <line x1={padL} y1={yFor(mediaMensal)} x2={w-padR} y2={yFor(mediaMensal)} stroke="var(--text3)" strokeWidth="1" strokeDasharray="3 3" opacity="0.5"/>
+              <text x={w-padR} y={yFor(mediaMensal)-3} textAnchor="end" fontSize="8" fill="var(--text3)" fontFamily="Plus Jakarta Sans">média {fmtK(mediaMensal)}</text>
+
+              {/* Área dos dados reais */}
+              {realScreenPts.length>1&&(
+                <path d={`M${realScreenPts[0].x} ${padT+plotH}${realScreenPts.map(p=>` L${p.x} ${p.y}`).join('')}L${realScreenPts[realScreenPts.length-1].x} ${padT+plotH}Z`}
                   fill={linecol} opacity="0.12"/>
               )}
-              {/* Linha */}
-              {points.length>1&&(
-                <polyline points={points.map(p=>`${p.x},${p.y}`).join(' ')}
+              {/* Linha dos dados reais */}
+              {realScreenPts.length>1&&(
+                <polyline points={realScreenPts.map(p=>`${p.x},${p.y}`).join(' ')}
                   fill="none" stroke={linecol} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
               )}
-              {/* Pontos */}
-              {points.map((p,i)=>(
-                <g key={i}>
+              {/* Linha de projeção (tracejada) — conecta último ponto real aos projetados */}
+              {projScreenPts.length>0&&(
+                <polyline points={[realScreenPts[realScreenPts.length-1],...projScreenPts].map(p=>`${p.x},${p.y}`).join(' ')}
+                  fill="none" stroke={linecol} strokeWidth="2" strokeDasharray="5 4" strokeLinecap="round" opacity="0.7"/>
+              )}
+              {/* Pontos reais */}
+              {realScreenPts.map((p,i)=>(
+                <g key={`r${i}`}>
                   <circle cx={p.x} cy={p.y} r="3.5" fill={linecol}/>
                   <title>{mlabel(p.p.m)}: {fmt(p.p.total)}</title>
                 </g>
               ))}
+              {/* Pontos projetados (vazados) */}
+              {projScreenPts.map((p,i)=>(
+                <g key={`p${i}`}>
+                  <circle cx={p.x} cy={p.y} r="3.5" fill="var(--bg2)" stroke={linecol} strokeWidth="2" strokeDasharray="2 1.5"/>
+                  <title>Projeção {mlabel(p.p.m)}: {fmt(p.p.total)}</title>
+                </g>
+              ))}
               {/* Labels do eixo X */}
-              {points.map((p,i)=>{
-                const showLabel=points.length<=6||i%Math.ceil(points.length/6)===0||i===points.length-1;
+              {allPts.map((p,i)=>{
+                const showLabel=allPts.length<=8||i%Math.ceil(allPts.length/8)===0||i===allPts.length-1;
                 if(!showLabel)return null;
+                const sp=xFor(p.idx);
                 return(
-                  <text key={`l${i}`} x={p.x} y={h-6} textAnchor="middle" fontSize="9" fill="var(--text2)" fontFamily="Plus Jakarta Sans">
-                    {mlabelShort(p.p.m)}
+                  <text key={`l${i}`} x={sp} y={h-8} textAnchor="middle" fontSize="9" fill={p.real?'var(--text2)':'var(--text3)'} fontFamily="Plus Jakarta Sans" fontStyle={p.real?'normal':'italic'}>
+                    {mlabelShort(p.m)}
                   </text>
                 );
               })}
             </svg>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:6}}>
-              <span style={{fontSize:11,color:'var(--text2)'}}>Total no período: <strong style={{color:linecol}}>{fmt(dataPts.reduce((s,p)=>s+p.total,0))}</strong></span>
+
+            {/* Estatísticas resumidas */}
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:10}}>
+              <div style={{padding:'8px 10px',background:'var(--bg3)',borderRadius:8}}>
+                <div style={{fontSize:10,color:'var(--text2)',fontWeight:600}}>Média mensal</div>
+                <div style={{fontSize:14,fontWeight:800,color:linecol,marginTop:1}}>{fmt(mediaMensal)}</div>
+              </div>
+              <div style={{padding:'8px 10px',background:'var(--bg3)',borderRadius:8}}>
+                <div style={{fontSize:10,color:'var(--text2)',fontWeight:600}}>Variação último mês</div>
+                <div style={{fontSize:14,fontWeight:800,color:variacaoMoM>0?'var(--red)':variacaoMoM<0?'var(--green)':'var(--text2)',marginTop:1}}>
+                  {variacaoMoM>0?'↑':variacaoMoM<0?'↓':''} {Math.abs(variacaoMoM).toFixed(0)}%
+                </div>
+              </div>
+            </div>
+            {showProjection&&projProximoMes!=null&&(
+              <div style={{marginTop:8,padding:'8px 10px',background:'var(--accent-bg)',borderRadius:8,fontSize:11,color:'var(--text2)',lineHeight:1.5}}>
+                🔮 <strong style={{color:'var(--accent)'}}>Projeção {mlabel(projPts[0].m)}:</strong> mantendo o ritmo atual, a estimativa é de <strong style={{color:'var(--accent)'}}>{fmt(projProximoMes)}</strong>. Baseada em regressão linear sobre {dataPts.length} meses.
+              </div>
+            )}
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:8}}>
+              <span style={{fontSize:11,color:'var(--text2)'}}>Total no período: <strong style={{color:linecol}}>{fmt(totalPeriodo)}</strong></span>
               <span style={{fontSize:11,color:'var(--text2)'}}>Máx: <strong style={{color:'var(--text)'}}>{fmtK(max)}</strong></span>
             </div>
           </div>
@@ -1796,19 +1928,36 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
       {/* Recentes */}
       <div className="card" style={{padding:'16px 14px'}}>
         <ST>Recentes</ST>
-        {[...catRows].sort((a,b)=>b.date>a.date?1:-1).slice(0,5).map((r,i,arr)=>(
-          <div key={i} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 0',borderBottom:i<arr.length-1?'1px solid var(--border)':'none'}}>
-            <div style={{width:36,height:36,borderRadius:10,background:(CAT_COLOR[r.categoria]||'#555')+'18',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17,flexShrink:0}}>
-              {CAT_EMOJI[r.categoria]||'📌'}
+        {(()=>{
+          // Recentes considera TODOS os lançamentos da pessoa (não só do mês selecionado),
+          // ordenados do mais novo para o mais antigo.
+          const allPersonRows=pessoa==='Lindito'?data.filter(r=>r.deQuem==='Lindito'||r.deQuem==='Conjunto')
+            :pessoa==='Mozicho'?data.filter(r=>r.deQuem==='Mozicho'||r.deQuem==='Conjunto')
+            :data;
+          const recentes=[...allPersonRows]
+            .filter(r=>toMk(r.date))
+            .sort((a,b)=>b.date>a.date?1:b.date<a.date?-1:0)
+            .slice(0,30);
+          if(recentes.length===0){
+            return<div style={{textAlign:'center',color:'var(--text3)',padding:'16px 0',fontSize:13}}>Nenhum lançamento</div>;
+          }
+          return(
+            <div style={{maxHeight:320,overflowY:'auto',WebkitOverflowScrolling:'touch'}}>
+              {recentes.map((r,i,arr)=>(
+                <div key={r._row||`${r.date}-${i}`} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 0',borderBottom:i<arr.length-1?'1px solid var(--border)':'none'}}>
+                  <div style={{width:36,height:36,borderRadius:10,background:(CAT_COLOR[r.categoria]||'#555')+'18',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17,flexShrink:0}}>
+                    {CAT_EMOJI[r.categoria]||'📌'}
+                  </div>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.desc}</div>
+                    <div style={{fontSize:10,color:'var(--text2)',marginTop:1}}>{fmtDate(r.date)} · <span style={{color:PERSON_COLOR[r.deQuem]||'var(--text2)',fontWeight:700}}>{r.deQuem}</span></div>
+                  </div>
+                  <span style={{fontSize:14,fontWeight:700,flexShrink:0}}>{fmt(r.deQuem==='Conjunto'&&pessoa!=='Conjunto'?r.valor/2:r.valor)}</span>
+                </div>
+              ))}
             </div>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.desc}</div>
-              <div style={{fontSize:10,color:'var(--text2)',marginTop:1}}>{fmtDate(r.date)} · <span style={{color:PERSON_COLOR[r.deQuem]||'var(--text2)',fontWeight:700}}>{r.deQuem}</span></div>
-            </div>
-            <span style={{fontSize:14,fontWeight:700,flexShrink:0}}>{fmt(r.deQuem==='Conjunto'&&pessoa!=='Conjunto'?r.valor/2:r.valor)}</span>
-          </div>
-        ))}
-        {catRows.length===0&&<div style={{textAlign:'center',color:'var(--text3)',padding:'16px 0',fontSize:13}}>Nenhum lançamento</div>}
+          );
+        })()}
       </div>
       <div style={{height:8}}></div>
       {showBudget&&<OrcamentoModal onClose={()=>setShowBudget(false)} budgets={monthBudget.budgets} extras={monthBudget.extras} onSave={saveBudget} monthKey={selM} hasSheetsSync={typeof syncBudgetToSheets==='function'}/>}
