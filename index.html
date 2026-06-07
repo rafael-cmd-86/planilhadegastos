@@ -44,8 +44,8 @@
   --conj:#3dd68c;--conj-bg:#0d2a1e;--conj-border:#1a4d35;
   --accent:#9d7aff;--accent-bg:#1e1635;
 }
-html,body{height:100%;background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden;transition:background 0.2s,color 0.2s}
-#root{height:100%;display:flex;flex-direction:column}
+html,body{height:100%;height:100dvh;background:var(--bg);color:var(--text);font-family:'Plus Jakarta Sans',sans-serif;-webkit-font-smoothing:antialiased;overflow:hidden;transition:background 0.2s,color 0.2s}
+#root{height:100%;height:100dvh;display:flex;flex-direction:column}
 button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
 input,select,textarea{font-family:inherit;color:var(--text);background:transparent}
 ::-webkit-scrollbar{display:none}*{scrollbar-width:none}
@@ -61,9 +61,9 @@ input,select,textarea{font-family:inherit;color:var(--text);background:transpare
 .fab{position:fixed;bottom:calc(var(--nav-h) + var(--safe-b) + 12px);right:16px;width:54px;height:54px;border-radius:27px;background:var(--accent);color:#fff;font-size:28px;line-height:1;display:flex;align-items:center;justify-content:center;box-shadow:0 4px 16px rgba(108,71,255,0.35);z-index:99;transition:transform 0.15s;padding:0}
 .fab:active{transform:scale(0.9)}
 .fab svg{display:block;width:26px;height:26px;flex-shrink:0}
-.modal-bg{position:fixed;inset:0;background:rgba(0,0,0,0.45);z-index:200;display:flex;align-items:flex-end;backdrop-filter:blur(8px);animation:fadeIn 0.2s ease}
-.modal{width:100%;background:var(--bg2);border-radius:24px 24px 0 0;padding:0 0 calc(24px + var(--safe-b));animation:slideUp 0.28s cubic-bezier(0.34,1.4,0.64,1);max-height:95vh;overflow-y:auto;position:relative}
-.modal-full{border-radius:0;max-height:100vh;height:100vh}
+.modal-bg{position:fixed;top:0;left:0;right:0;height:100vh;height:100dvh;background:rgba(0,0,0,0.45);z-index:200;display:flex;align-items:flex-end;backdrop-filter:blur(8px);animation:fadeIn 0.2s ease}
+.modal{width:100%;background:var(--bg2);border-radius:24px 24px 0 0;padding:0 0 calc(32px + var(--safe-b));animation:slideUp 0.28s cubic-bezier(0.34,1.4,0.64,1);max-height:92vh;max-height:92dvh;overflow-y:auto;-webkit-overflow-scrolling:touch;position:relative}
+.modal-full{border-radius:0;max-height:100vh;max-height:100dvh;height:100vh;height:100dvh}
 @keyframes fadeIn{from{opacity:0}to{opacity:1}}
 @keyframes slideUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
 .modal-handle{width:40px;height:4px;background:var(--border2);border-radius:2px;margin:12px auto 18px}
@@ -1068,7 +1068,7 @@ function SetupScreen({onDone}){
 // ── Authentication Gate ───────────────────────────────────────────────────────
 function AuthGate({onSignIn,onReconfigure,loading}){
   return(
-    <div style={{flex:1,display:'flex',flexDirection:'column',justifyContent:'center',padding:'32px 24px',paddingTop:'calc(32px + var(--safe-t))'}}>
+    <div style={{flex:1,overflow:'auto',display:'flex',flexDirection:'column',justifyContent:'center',padding:'32px 24px',paddingTop:'calc(32px + var(--safe-t))',paddingBottom:'calc(32px + var(--safe-b))'}}>
       <div style={{fontSize:34,marginBottom:16}}>🔐</div>
       <div style={{fontSize:26,fontWeight:800,marginBottom:8}}>Acesso protegido</div>
       <div style={{fontSize:14,color:'var(--text2)',lineHeight:1.65,marginBottom:26}}>
@@ -3752,16 +3752,26 @@ function App(){
     }
   },[db]);
 
+  // Sincroniza TUDO (lançamentos + orçamentos/estimativas + cofrinhos) de uma vez.
+  // Garante que algo salvo em outro aparelho (ex: iPhone) apareça aqui (ex: Android).
+  const syncAll=useCallback(async()=>{
+    if(!db)return;
+    await Promise.all([syncFromSheets(),syncBudgetsFromSheets(),syncCofrinhosFromSheets()]);
+  },[db,syncFromSheets,syncBudgetsFromSheets,syncCofrinhosFromSheets]);
+
   useEffect(()=>{if(db){syncFromSheets();syncBudgetsFromSheets();syncCofrinhosFromSheets();}},[db]);
 
-  // Auto-sync: poll every 60s + when tab regains focus, so changes added directly
-  // in the spreadsheet show up automatically.
+  // Ao trocar de aba, recarrega tudo da planilha (pega mudanças feitas em outro aparelho)
+  useEffect(()=>{if(db)syncAll();},[tab,db,syncAll]);
+
+  // Auto-sync: poll every 30s + when tab regains focus, so changes added directly
+  // in the spreadsheet (or by the other person on another device) show up automatically.
   useEffect(()=>{
     if(!db)return;
     const run=()=>{syncFromSheets();syncBudgetsFromSheets();syncCofrinhosFromSheets();};
     const id=setInterval(()=>{
       if(document.visibilityState==='visible'){run();}
-    },60*1000);
+    },30*1000);
     function onVis(){if(document.visibilityState==='visible'){run();}}
     function onFocus(){run();}
     document.addEventListener('visibilitychange',onVis);
@@ -3928,10 +3938,10 @@ function App(){
 
   return(
     <>
-      {tab==='home'&&<Home data={data} pessoa={pessoa} setPessoa={setPessoa} budgetData={budgetData} setBudgetData={setBudgetData} cofrinhoData={cofrinhoData} syncStatus={syncStatus} syncBudgetToSheets={syncBudgetToSheets} saveMetasToSheets={saveMetasToSheets} onRefresh={syncFromSheets} onAddReceita={()=>{setAddMode('receita');setShowAdd(true);}}/>}
-      {tab==='saldos'&&<Saldos data={data} onQuit={(m)=>{setQuitPreMonth(m||null);setShowQuit(true);}} onRefresh={syncFromSheets} syncStatus={syncStatus}/>}
-      {tab==='cofrinhos'&&<Cofrinhos cofrinhoData={cofrinhoData} onWithdraw={handleCofrinho} onDeposit={()=>{setAddMode('cofrinho');setShowAdd(true);}} onRefresh={syncCofrinhosFromSheets} syncStatus={syncStatus}/>}
-      {tab==='historico'&&<Historico data={data} pessoa={pessoa} onEdit={setEditEntry} onRefresh={syncFromSheets} syncStatus={syncStatus}/>}
+      {tab==='home'&&<Home data={data} pessoa={pessoa} setPessoa={setPessoa} budgetData={budgetData} setBudgetData={setBudgetData} cofrinhoData={cofrinhoData} syncStatus={syncStatus} syncBudgetToSheets={syncBudgetToSheets} saveMetasToSheets={saveMetasToSheets} onRefresh={syncAll} onAddReceita={()=>{setAddMode('receita');setShowAdd(true);}}/>}
+      {tab==='saldos'&&<Saldos data={data} onQuit={(m)=>{setQuitPreMonth(m||null);setShowQuit(true);}} onRefresh={syncAll} syncStatus={syncStatus}/>}
+      {tab==='cofrinhos'&&<Cofrinhos cofrinhoData={cofrinhoData} onWithdraw={handleCofrinho} onDeposit={()=>{setAddMode('cofrinho');setShowAdd(true);}} onRefresh={syncAll} syncStatus={syncStatus}/>}
+      {tab==='historico'&&<Historico data={data} pessoa={pessoa} onEdit={setEditEntry} onRefresh={syncAll} syncStatus={syncStatus}/>}
       {tab==='config'&&(
         <div className="screen" style={{padding:'0 16px'}}>
           <div style={{padding:'calc(14px + var(--safe-t)) 0 20px'}}><div style={{fontSize:22,fontWeight:800}}>Configurações</div></div>
@@ -4021,6 +4031,8 @@ function App(){
             <div style={{fontSize:13,color:'var(--text2)',lineHeight:2,wordBreak:'break-word',overflowWrap:'anywhere'}}>
               <div>📊 {data.length} lançamentos carregados da planilha</div>
               <div>🔄 Sync: <span style={{color:syncStatus==='ok'?'var(--green)':syncStatus==='syncing'?'var(--accent)':'var(--text3)',fontWeight:700}}>{syncStatus==='ok'?'OK':syncStatus==='syncing'?'Sincronizando...':'Não conectado'}</span></div>
+              <div>📄 Planilha conectada: <span style={{fontFamily:'monospace',fontSize:11,color:'var(--text)',userSelect:'all'}}>{(localStorage.getItem('g_sheet_id')||'—')}</span></div>
+              <div style={{fontSize:11,color:'var(--text3)',lineHeight:1.5,marginTop:2}}>Para os dois aparelhos verem os mesmos dados, este ID precisa ser idêntico no celular da Mozicho e no do Lindito (mesma planilha do Google).</div>
               {(()=>{
                 // Diagnóstico: detectar lançamentos com data não reconhecida
                 const problemRows=data.filter(r=>{
