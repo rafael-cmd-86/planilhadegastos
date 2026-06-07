@@ -375,7 +375,7 @@ class SheetsDB {
   }
 
   // ── Cofrinhos sheet helpers ───────────────────────────────────────────────────
-  // Aba "Cofrinhos": Data | Cofrinho | Tipo (Depósito/Retirada) | Valor | De quem | Descrição
+  // Aba "Cofrinhos": Data | Cofrinho | Tipo (Depósito/Retirada) | Valor | De quem | Descrição | Instituição
   async ensureCofrinhosSheet(){
     const meta=await (await fetch(this.base,{headers:this.headers()})).json();
     const exists=meta.sheets?.some(s=>s.properties.title==='Cofrinhos');
@@ -384,16 +384,16 @@ class SheetsDB {
         method:'POST',headers:this.headers(),
         body:JSON.stringify({requests:[{addSheet:{properties:{title:'Cofrinhos'}}}]})
       });
-      await fetch(`${this.base}/values/Cofrinhos!A1:F1?valueInputOption=RAW`,{
+      await fetch(`${this.base}/values/Cofrinhos!A1:G1?valueInputOption=RAW`,{
         method:'PUT',headers:this.headers(),
-        body:JSON.stringify({values:[['Data','Cofrinho','Tipo','Valor','De quem','Descrição']]})
+        body:JSON.stringify({values:[['Data','Cofrinho','Tipo','Valor','De quem','Descrição','Instituição']]})
       });
     }
   }
 
   async getCofrinhos(){
     try{
-      const r=await fetch(`${this.base}/values/Cofrinhos!A:F?valueRenderOption=FORMATTED_VALUE`,{headers:this.headers()});
+      const r=await fetch(`${this.base}/values/Cofrinhos!A:G?valueRenderOption=FORMATTED_VALUE`,{headers:this.headers()});
       if(!r.ok)return[];
       const d=await r.json();
       const rows=(d.values||[]).slice(1);
@@ -404,15 +404,16 @@ class SheetsDB {
         tipo:row[2]||'Depósito',
         valor:parseValor(row[3]),
         deQuem:row[4]||'',
-        desc:row[5]||''
+        desc:row[5]||'',
+        instituicao:row[6]||''
       }));
     }catch{return[];}
   }
 
   async appendCofrinho(tx){
     await this.ensureCofrinhosSheet();
-    const row=[[fmtDate(tx.date),tx.cofrinho,tx.tipo||'Depósito',valorToSheet(tx.valor),tx.deQuem||'',tx.desc||'']];
-    const r=await fetch(`${this.base}/values/Cofrinhos!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
+    const row=[[fmtDate(tx.date),tx.cofrinho,tx.tipo||'Depósito',valorToSheet(tx.valor),tx.deQuem||'',tx.desc||'',tx.instituicao||'']];
+    const r=await fetch(`${this.base}/values/Cofrinhos!A:G:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
       method:'POST',headers:this.headers(),
       body:JSON.stringify({values:row})
     });
@@ -1265,7 +1266,7 @@ function EditModal({entry,onClose,onSave,onDelete}){
 }
 
 // ── Add Modal ─────────────────────────────────────────────────────────────────
-function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatStoreChange,initialMode}){
+function AddModal({onClose,onSave,onSaveCofrinho,cofrinhoData=[],defaultPessoa,debt,data,onCatStoreChange,initialMode}){
   // mode: 'gasto' | 'receita' | 'quitacao' | 'cofrinho'
   const [mode,setMode]=useState(initialMode||'gasto');
   const [valor,setValor]=useState('');
@@ -1284,6 +1285,15 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
   // Cofrinho (depósito)
   const [cofrinho,setCofrinho]=useState(getCofrinhoNames()[0]||'');
   const [cofreVersion,setCofreVersion]=useState(0);
+  const [localJars,setLocalJars]=useState([]); // cofrinhos criados nesta sessão
+  // Cofrinhos disponíveis para a pessoa selecionada (derivados das movimentações
+  // + criados nesta sessão; se não houver, usa a lista padrão como sugestão)
+  const cofrinhoOptions=(person)=>{
+    const personJars=[...new Set(cofrinhoData.filter(c=>(c.deQuem||'Conjunto')===person).map(c=>c.cofrinho))];
+    let opts=[...new Set([...personJars,...localJars])];
+    if(opts.length===0)opts=getCofrinhoNames();
+    return opts;
+  };
   // Receita recorrente
   const [recorrente,setRecorrente]=useState(false);
   const [meses,setMeses]=useState('12');
@@ -1306,6 +1316,12 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
   const [recorrenteId,setRecorrenteId]=useState(()=>Date.now().toString(36)+Math.random().toString(36).slice(2));
   const ref=useRef();
   useEffect(()=>{setTimeout(()=>ref.current?.focus(),120)},[]);
+  // Mantém o cofrinho selecionado válido para a pessoa escolhida
+  useEffect(()=>{
+    if(mode!=='cofrinho')return;
+    const opts=cofrinhoOptions(deQuem);
+    if(!opts.includes(cofrinho))setCofrinho(opts[0]||'');
+  },[deQuem,mode,localJars]);
 
   // Botão "voltar" do celular fecha o modal em vez de sair da página
   useBackButton(onClose,'add');
@@ -1328,7 +1344,7 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
       const nome=(cofrinho||'').trim();
       if(!nome){return;}
       addCofrinhoName(nome);
-      onSaveCofrinho&&onSaveCofrinho({date,cofrinho:nome,tipo:'Depósito',valor:v,deQuem,desc:desc||`Depósito em ${nome}`});
+      onSaveCofrinho&&onSaveCofrinho({date,cofrinho:nome,tipo:'Depósito',valor:v,deQuem,desc:desc||`Depósito em ${nome}`,instituicao});
       onClose();
       return;
     }
@@ -1492,25 +1508,45 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
           </div>
         )}
 
-        {mode==='cofrinho'&&(
-          <div className="field">
-            <div className="fl">Cofrinho de destino</div>
-            <select className="fi" value={cofrinho} onChange={e=>{
-              if(e.target.value==='__add__'){
-                const nome=window.prompt('Nome do novo cofrinho (ex: Viagem Japão, Carro novo):');
-                if(nome&&nome.trim()){addCofrinhoName(nome);setCofrinho(nome.trim());setCofreVersion(v=>v+1);}
-                return;
-              }
-              setCofrinho(e.target.value);
-            }}>
-              {getCofrinhoNames().map(c=><option key={c} value={c}>🐷 {c}</option>)}
-              <option value="__add__" style={{fontWeight:'bold',color:'var(--amber)'}}>+ Novo cofrinho…</option>
-            </select>
-            <div style={{marginTop:8,padding:'10px 12px',background:'var(--bg3)',borderRadius:10,fontSize:12,color:'var(--text2)',lineHeight:1.5}}>
-              💡 Esse valor sai do seu “disponível para gastar” do mês e é guardado no cofrinho. Você pode retirar depois na aba <strong style={{color:'var(--amber)'}}>Cofrinhos</strong>.
+        {mode==='cofrinho'&&(()=>{
+          const options=cofrinhoOptions(deQuem);
+          const valid=options.includes(cofrinho)?cofrinho:(options[0]||'');
+          return(
+            <div className="field">
+              <div className="fl">Dono do cofrinho</div>
+              <div className="chip-row" style={{marginBottom:14}}>
+                {['Conjunto','Lindito','Mozicho'].map(p=>(
+                  <button key={p} className={`chip ${PERSON_CLS[p]} ${deQuem===p?'active':''}`} onClick={()=>setDeQuem(p)}>{p}</button>
+                ))}
+              </div>
+              <div className="fl">Cofrinho de destino</div>
+              <select className="fi" value={valid} onChange={e=>{
+                if(e.target.value==='__add__'){
+                  const nome=window.prompt('Nome do novo cofrinho (ex: Viagem Japão, Carro novo):');
+                  if(nome&&nome.trim()){const t=nome.trim();addCofrinhoName(t);setLocalJars(j=>[...new Set([...j,t])]);setCofrinho(t);setCofreVersion(v=>v+1);}
+                  return;
+                }
+                setCofrinho(e.target.value);
+              }}>
+                {options.length===0&&<option value="">— nenhum —</option>}
+                {options.map(c=><option key={c} value={c}>🐷 {c}</option>)}
+                <option value="__add__" style={{fontWeight:'bold',color:'var(--amber)'}}>+ Novo cofrinho…</option>
+              </select>
+              <div style={{marginTop:14}}>
+                <div className="fl">Banco onde está guardado</div>
+                <div className="chip-row">
+                  {getInstituicoes().map(b=>(
+                    <button key={b} onClick={()=>setInstituicao(instituicao===b?'':b)} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:600,background:instituicao===b?'var(--amber)':'var(--bg3)',color:instituicao===b?'#fff':'var(--text2)',border:`1.5px solid ${instituicao===b?'var(--amber)':'var(--border)'}`}}>{b}</button>
+                  ))}
+                  <button onClick={()=>{const nv=window.prompt('Novo banco/instituição:');if(nv&&nv.trim()){addInstituicao(nv);setInstituicao(nv.trim());setPayVersion(v=>v+1);}}} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:700,background:'var(--bg3)',color:'var(--accent)',border:'1.5px dashed var(--border2)'}}>+ Novo</button>
+                </div>
+              </div>
+              <div style={{marginTop:12,padding:'10px 12px',background:'var(--bg3)',borderRadius:10,fontSize:12,color:'var(--text2)',lineHeight:1.5}}>
+                💡 Esse valor sai do seu “disponível para gastar” do mês e é guardado no cofrinho. Você pode retirar depois na aba <strong style={{color:'var(--amber)'}}>Cofrinhos</strong>.
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
         {mode==='gasto'&&(
           <div className="field">
@@ -1527,7 +1563,7 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
           </div>
         )}
 
-        {mode!=='quitacao'&&!(mode==='gasto'&&proporcional)&&(
+        {mode!=='quitacao'&&mode!=='cofrinho'&&!(mode==='gasto'&&proporcional)&&(
           <div className="field">
             <div className="fl">{mode==='receita'?'De quem?':'De quem?'}</div>
             <div className="chip-row">
@@ -2011,8 +2047,23 @@ function MultiCatTrend({data,pessoa,allMs}){
 // Ao escolher uma categoria (ex: Moradia), mostra cada item/descrição (Aluguel,
 // Condomínio, Internet, Copel, Gás…) como uma linha, com o histórico mês a mês.
 const ITEM_PALETTE=['#6c47ff','#0a9e6e','#e8450a','#3d6ef5','#d97706','#db2777','#0891b2','#16a34a','#7c3aed','#dc2626'];
-function normalizeDesc(s){
-  return String(s||'').replace(/\s*\(\d+\/\d+\)\s*$/,'').trim()||'(sem descrição)';
+// Limpa a descrição de um item removendo marcadores de parcela e datas/meses,
+// para que "Aluguel dez/25", "Aluguel ago/25", "Aluguel (3/12)" virem só "Aluguel".
+// Mantém maiúsculas/acentos para exibição.
+function cleanItemLabel(s){
+  let x=String(s||'').trim();
+  x=x.replace(/\(\s*\d+\s*\/\s*\d+\s*\)/g,' ');                 // (3/12)
+  x=x.replace(/\b\d{1,2}\s*\/\s*\d{2,4}\b/g,' ');               // 12/25 ou 12/2025
+  x=x.replace(/\b(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-zç]*\.?\b/gi,' '); // mês (abrev/extenso)
+  x=x.replace(/\b\d{2,4}\b/g,' ');                              // anos/números soltos (25, 2025)
+  x=x.replace(/[\/\-–—]+/g,' ');                                // separadores
+  x=x.replace(/\s+/g,' ').trim();
+  x=x.replace(/\s+(de|do|da|dos|das|em|no|na)$/i,'').trim();    // conector solto no fim
+  return x||String(s||'').trim();
+}
+// Chave de agrupamento: minúscula e sem acento, para juntar variações de grafia
+function itemKey(s){
+  return cleanItemLabel(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim()||'(sem descrição)';
 }
 function CategoriaItensTrend({data,pessoa,allMs}){
   const nowMk=currentMk();
@@ -2049,24 +2100,36 @@ function CategoriaItensTrend({data,pessoa,allMs}){
   if(realMonths.length<2)return null;
   const windowMonths=range==='all'?realMonths:realMonths.slice(-range);
 
-  // Agrupa itens (por descrição normalizada) dentro da categoria escolhida
-  const itemTotals={};
+  // Agrupa itens dentro da categoria escolhida por uma chave normalizada
+  // (juntando "Aluguel dez/25", "Aluguel ago/25"… num único item "Aluguel").
+  const itemTotals={};      // key -> total
+  const labelCount={};      // key -> { label: contagem } para escolher o rótulo
   for(const r of data){
     if(r.categoria!==selCat)continue;
     const s=share(r);
     if(s<=0)continue;
-    const key=normalizeDesc(r.desc);
-    itemTotals[key]=(itemTotals[key]||0)+s;
+    const k=itemKey(r.desc);
+    itemTotals[k]=(itemTotals[k]||0)+s;
+    const lbl=cleanItemLabel(r.desc);
+    if(!labelCount[k])labelCount[k]={};
+    labelCount[k][lbl]=(labelCount[k][lbl]||0)+1;
   }
+  // Rótulo de exibição = variação mais frequente de cada chave
+  const labelFor=(k)=>{
+    const m=labelCount[k]||{};
+    let best='',n=-1;
+    for(const [lbl,c] of Object.entries(m)){if(c>n){n=c;best=lbl;}}
+    return best||k;
+  };
   const itemsSorted=Object.entries(itemTotals).sort((a,b)=>b[1]-a[1]).map(([k])=>k);
   const topItems=itemsSorted.slice(0,8); // limita para não poluir
 
-  const sumItem=(item,m)=>{
+  const sumItem=(key,m)=>{
     let t=0;
     for(const r of data){
       if(r.categoria!==selCat)continue;
       if(toMk(r.date)!==m)continue;
-      if(normalizeDesc(r.desc)!==item)continue;
+      if(itemKey(r.desc)!==key)continue;
       t+=share(r);
     }
     return t;
@@ -2133,7 +2196,7 @@ function CategoriaItensTrend({data,pessoa,allMs}){
                     <polyline points={screenPts.map(p=>`${p.x},${p.y}`).join(' ')} fill="none" stroke={s.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
                   )}
                   {screenPts.map((p,i)=>(
-                    <g key={i}><circle cx={p.x} cy={p.y} r="3" fill={s.color}/><title>{s.item} · {mlabel(p.m)}: {fmt(p.v)}</title></g>
+                    <g key={i}><circle cx={p.x} cy={p.y} r="3" fill={s.color}/><title>{labelFor(s.item)} · {mlabel(p.m)}: {fmt(p.v)}</title></g>
                   ))}
                 </g>
               );
@@ -2154,7 +2217,7 @@ function CategoriaItensTrend({data,pessoa,allMs}){
               return(
                 <button key={item} onClick={()=>setHidden(h=>({...h,[item]:!h[item]}))} style={{display:'flex',alignItems:'center',gap:8,fontSize:12,background:'none',border:'none',padding:0,textAlign:'left',opacity:isHidden?0.4:1,cursor:'pointer'}}>
                   <span style={{width:12,height:3,borderRadius:2,background:color,flexShrink:0}}></span>
-                  <span style={{flex:1,color:'var(--text2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item}</span>
+                  <span style={{flex:1,color:'var(--text2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{labelFor(item)}</span>
                   <span style={{fontWeight:700,color}}>{fmtK(tot)}</span>
                 </button>
               );
@@ -3417,10 +3480,12 @@ function MetasModal({onClose,monthKey,allMetas,onSave,sugeridas}){
 }
 
 // ── Modal de Retirada de Cofrinho ──────────────────────────────────────────────
-function RetiradaModal({onClose,cofrinho,saldo,onConfirm}){
+function RetiradaModal({onClose,cofrinho,saldo,defaultBank,onConfirm}){
   useBackButton(onClose,'retirada');
   const [valor,setValor]=useState('');
   const [desc,setDesc]=useState('');
+  const [inst,setInst]=useState(defaultBank||'');
+  const [bankVer,setBankVer]=useState(0);
   const v=parseFloat(String(valor).replace(',','.'))||0;
   return(
     <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&onClose()}>
@@ -3436,13 +3501,22 @@ function RetiradaModal({onClose,cofrinho,saldo,onConfirm}){
           <CurrencyInput value={valor} onChange={setValor}/>
         </div>
         <div className="field" style={{paddingTop:16}}>
+          <div className="fl">Banco de onde está saindo</div>
+          <div className="chip-row">
+            {getInstituicoes().map(b=>(
+              <button key={b} onClick={()=>setInst(inst===b?'':b)} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:600,background:inst===b?'var(--amber)':'var(--bg3)',color:inst===b?'#fff':'var(--text2)',border:`1.5px solid ${inst===b?'var(--amber)':'var(--border)'}`}}>{b}</button>
+            ))}
+            <button onClick={()=>{const nv=window.prompt('Novo banco/instituição:');if(nv&&nv.trim()){addInstituicao(nv);setInst(nv.trim());setBankVer(x=>x+1);}}} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:700,background:'var(--bg3)',color:'var(--accent)',border:'1.5px dashed var(--border2)'}}>+ Novo</button>
+          </div>
+        </div>
+        <div className="field">
           <div className="fl">Descrição (opcional)</div>
           <input className="fi" type="text" placeholder="Ex: usei para a viagem" value={desc} onChange={e=>setDesc(e.target.value)}/>
         </div>
         <div style={{margin:'4px 20px 0',padding:'10px 12px',background:'var(--conj-bg)',borderRadius:10,fontSize:12,color:'var(--text2)',lineHeight:1.5}}>
           💡 Ao retirar, esse valor volta para o seu “disponível para gastar” do mês atual.
         </div>
-        <button className="btn" onClick={()=>{if(v>0){onConfirm(v,desc);onClose();}}} disabled={v<=0} style={{background:'var(--amber)'}}>
+        <button className="btn" onClick={()=>{if(v>0){onConfirm(v,desc,inst);onClose();}}} disabled={v<=0} style={{background:'var(--amber)'}}>
           Confirmar retirada
         </button>
       </div>
@@ -3462,16 +3536,19 @@ function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
   // Agrega saldos por cofrinho (somente da pessoa filtrada)
   const jars={};
   for(const t of filtered){
-    if(!jars[t.cofrinho])jars[t.cofrinho]={nome:t.cofrinho,saldo:0,dep:0,ret:0,txs:[]};
+    if(!jars[t.cofrinho])jars[t.cofrinho]={nome:t.cofrinho,saldo:0,dep:0,ret:0,txs:[],banks:{}};
     const j=jars[t.cofrinho];
+    const sign=t.tipo==='Retirada'?-1:1;
     if(t.tipo==='Retirada'){j.saldo-=t.valor;j.ret+=t.valor;}
     else{j.saldo+=t.valor;j.dep+=t.valor;}
+    const bk=t.instituicao||'(sem banco)';
+    j.banks[bk]=(j.banks[bk]||0)+sign*t.valor;
     j.txs.push(t);
   }
   // No filtro "Conjunto", inclui também os cofrinhos cadastrados ainda sem movimentação
   if(pf==='Conjunto'){
     for(const nome of getCofrinhoNames()){
-      if(!jars[nome])jars[nome]={nome,saldo:0,dep:0,ret:0,txs:[]};
+      if(!jars[nome])jars[nome]={nome,saldo:0,dep:0,ret:0,txs:[],banks:{}};
     }
   }
   const jarList=Object.values(jars).sort((a,b)=>b.saldo-a.saldo);
@@ -3538,7 +3615,10 @@ function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
       })()}
 
       {/* Lista de cofrinhos */}
-      {jarList.map(j=>(
+      {jarList.map(j=>{
+        // Bancos com saldo > 0 dentro do cofrinho
+        const bankList=Object.entries(j.banks||{}).filter(([,v])=>Math.abs(v)>=0.01).sort((a,b)=>b[1]-a[1]);
+        return(
         <div key={j.nome} className="card" style={{marginBottom:10,padding:'14px'}}>
           <div style={{display:'flex',alignItems:'center',gap:12}}>
             <div style={{width:42,height:42,borderRadius:12,background:'var(--amber)'+'22',display:'flex',alignItems:'center',justifyContent:'center',fontSize:20,flexShrink:0}}>🐷</div>
@@ -3550,6 +3630,15 @@ function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
               <div style={{fontSize:18,fontWeight:800,color:'var(--amber)'}}>{fmt(j.saldo)}</div>
             </div>
           </div>
+          {bankList.length>0&&(
+            <div style={{display:'flex',flexWrap:'wrap',gap:6,marginTop:10}}>
+              {bankList.map(([bk,val])=>(
+                <span key={bk} style={{display:'inline-flex',alignItems:'center',gap:5,padding:'4px 10px',borderRadius:16,background:'var(--bg3)',border:'1px solid var(--border)',fontSize:11,fontWeight:700,color:'var(--text2)'}}>
+                  🏦 {bk}: <span style={{color:'var(--amber)'}}>{fmtK(val)}</span>
+                </span>
+              ))}
+            </div>
+          )}
           <div style={{display:'flex',gap:8,marginTop:12}}>
             <button onClick={()=>setRetirar(j.nome)} disabled={j.saldo<=0} style={{flex:1,padding:'9px',borderRadius:10,background:'var(--amber)',color:'#fff',fontSize:13,fontWeight:700,border:'none',opacity:j.saldo<=0?0.4:1}}>Retirar</button>
             <button onClick={()=>setOpenJar(openJar===j.nome?null:j.nome)} style={{flex:1,padding:'9px',borderRadius:10,background:'var(--bg3)',color:'var(--text2)',fontSize:13,fontWeight:700,border:'1px solid var(--border)'}}>{openJar===j.nome?'Ocultar':'Histórico'}</button>
@@ -3562,7 +3651,7 @@ function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
                   <span style={{fontSize:14}}>{t.tipo==='Retirada'?'⬆️':'⬇️'}</span>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:12,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.desc||t.tipo}</div>
-                    <div style={{fontSize:10,color:'var(--text2)'}}>{fmtDate(t.date)}{t.deQuem?' · '+t.deQuem:''}</div>
+                    <div style={{fontSize:10,color:'var(--text2)'}}>{fmtDate(t.date)}{t.deQuem?' · '+t.deQuem:''}{t.instituicao?' · 🏦 '+t.instituicao:''}</div>
                   </div>
                   <span style={{fontSize:13,fontWeight:700,color:t.tipo==='Retirada'?'var(--red)':'var(--green)'}}>{t.tipo==='Retirada'?'-':'+'}{fmt(t.valor)}</span>
                 </div>
@@ -3570,21 +3659,28 @@ function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
             </div>
           )}
         </div>
-      ))}
+        );
+      })}
 
       <button onClick={onDeposit} style={{width:'100%',padding:'14px',marginTop:4,borderRadius:14,background:'var(--bg3)',border:'1.5px dashed var(--border2)',color:'var(--amber)',fontSize:14,fontWeight:700}}>
         ＋ Guardar dinheiro em um cofrinho
       </button>
       <div style={{height:8}}></div>
 
-      {retirar&&(
-        <RetiradaModal
-          cofrinho={retirar}
-          saldo={(jars[retirar]||{}).saldo||0}
-          onClose={()=>setRetirar(null)}
-          onConfirm={(v,desc)=>onWithdraw({date:today(),cofrinho:retirar,tipo:'Retirada',valor:v,deQuem:pf,desc:desc||`Retirada de ${retirar}`})}
-        />
-      )}
+      {retirar&&(()=>{
+        const jar=jars[retirar]||{banks:{}};
+        const bl=Object.entries(jar.banks||{}).filter(([,v])=>Math.abs(v)>=0.01).sort((a,b)=>b[1]-a[1]);
+        const defaultBank=bl.length&&bl[0][0]!=='(sem banco)'?bl[0][0]:'';
+        return(
+          <RetiradaModal
+            cofrinho={retirar}
+            saldo={jar.saldo||0}
+            defaultBank={defaultBank}
+            onClose={()=>setRetirar(null)}
+            onConfirm={(v,desc,inst)=>onWithdraw({date:today(),cofrinho:retirar,tipo:'Retirada',valor:v,deQuem:pf,desc:desc||`Retirada de ${retirar}`,instituicao:inst||''})}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -3991,7 +4087,7 @@ function App(){
         ))}
       </nav>
 
-      {showAdd&&<AddModal onClose={()=>setShowAdd(false)} onSave={handleSave} onSaveCofrinho={handleCofrinho} defaultPessoa={pessoa} debt={debtTotal} data={data} onCatStoreChange={()=>setCatVersion(v=>v+1)} initialMode={addMode}/>}
+      {showAdd&&<AddModal onClose={()=>setShowAdd(false)} onSave={handleSave} onSaveCofrinho={handleCofrinho} cofrinhoData={cofrinhoData} defaultPessoa={pessoa} debt={debtTotal} data={data} onCatStoreChange={()=>setCatVersion(v=>v+1)} initialMode={addMode}/>}
       {showQuit&&<QuitacaoModal onClose={()=>{setShowQuit(false);setQuitPreMonth(null);}} onSave={handleSave} debt={debtTotal} data={data} preSelMonth={quitPreMonth}/>}
       {editEntry&&<EditModal entry={editEntry} onClose={()=>setEditEntry(null)} onSave={(updated)=>handleEdit(editEntry,updated)} onDelete={handleDelete} catVersion={catVersion}/>}
       {showCatMgr&&<CategoriasModal onClose={()=>setShowCatMgr(false)} onChange={()=>setCatVersion(v=>v+1)} data={data}/>}
