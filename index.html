@@ -49,7 +49,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'Plus J
 button{font-family:inherit;cursor:pointer;border:none;background:none;color:inherit}
 input,select,textarea{font-family:inherit;color:var(--text);background:transparent}
 ::-webkit-scrollbar{display:none}*{scrollbar-width:none}
-.screen{flex:1;overflow-y:auto;padding-bottom:calc(var(--nav-h) + var(--safe-b) + 24px)}
+.screen{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(var(--nav-h) + var(--safe-b) + 72px)}
 .nav{position:fixed;bottom:0;left:0;right:0;height:calc(var(--nav-h) + var(--safe-b));background:var(--bg2);border-top:1px solid var(--border);display:flex;align-items:flex-start;padding-top:8px;padding-bottom:var(--safe-b);z-index:100}
 .nav-item{flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;padding:5px 0;cursor:pointer;position:relative}
 .nav-dot{width:4px;height:4px;border-radius:50%;background:var(--accent);position:absolute;bottom:2px;opacity:0;transition:opacity 0.2s}
@@ -244,7 +244,7 @@ class SheetsDB {
       date:normalizeDate(r[0]),
       desc:r[1]||'',
       valor:parseValor(r[2]),
-      categoria:r[3]||'',
+      categoria:normalizeCat(r[3]||''),
       deQuem:r[4]||'',
       quemPagou:r[5]||'',
       forma:r[6]||'',
@@ -254,7 +254,7 @@ class SheetsDB {
 
   async append(entry){
     const dateBR=fmtDate(entry.date);
-    const row=[[dateBR,entry.desc,valorToSheet(entry.valor),entry.categoria,entry.deQuem,entry.quemPagou,entry.forma||'',entry.instituicao||'']];
+    const row=[[dateBR,entry.desc,valorToSheet(entry.valor),normalizeCat(entry.categoria),entry.deQuem,entry.quemPagou,entry.forma||'',entry.instituicao||'']];
     const r=await fetch(`${this.base}/values/${SHEET_NAME}!A:H:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
       method:'POST',headers:this.headers(),
       body:JSON.stringify({values:row})
@@ -265,7 +265,7 @@ class SheetsDB {
 
   async update(rowNum, entry){
     const dateBR=fmtDate(entry.date);
-    const row=[[dateBR,entry.desc,valorToSheet(entry.valor),entry.categoria,entry.deQuem,entry.quemPagou,entry.forma||'',entry.instituicao||'']];
+    const row=[[dateBR,entry.desc,valorToSheet(entry.valor),normalizeCat(entry.categoria),entry.deQuem,entry.quemPagou,entry.forma||'',entry.instituicao||'']];
     const r=await fetch(`${this.base}/values/${SHEET_NAME}!A${rowNum}:H${rowNum}?valueInputOption=USER_ENTERED`,{
       method:'PUT',headers:this.headers(),
       body:JSON.stringify({values:row})
@@ -574,6 +574,16 @@ function parseValor(v){
 function valorToSheet(v){
   const n=Number(v)||0;
   return n.toFixed(2).replace('.',',');
+}
+// Remove emojis/símbolos do INÍCIO do nome da categoria. Versões antigas gravaram
+// a categoria com emoji (ex: "🏠 Moradia"), o que quebrava os filtros/gráficos por
+// não baterem com o nome puro ("Moradia"). Normalizamos na leitura e na gravação
+// para que a categoria seja sempre o texto puro; o emoji continua aparecendo só na tela.
+function normalizeCat(c){
+  let s=String(c||'').trim();
+  // Remove blocos de emoji/símbolos no começo (emoji, variation selectors, ZWJ) + espaços
+  s=s.replace(/^(?:[\u{1F000}-\u{1FAFF}\u{2190}-\u{27BF}\u{2B00}-\u{2BFF}\u{1F1E6}-\u{1F1FF}\u{FE0F}\u{200D}\u{20E3}\u{2122}\u{2139}\u{2300}-\u{23FF}]+\s*)+/u,'');
+  return s.trim();
 }
 function normalizeDate(d){
   if(d===null||d===undefined||d==='')return'';
@@ -1268,6 +1278,9 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
   const [forma,setForma]=useState('');
   const [instituicao,setInstituicao]=useState('');
   const [payVersion,setPayVersion]=useState(0); // re-render ao adicionar forma/instituição
+  // Rateio proporcional entre Lindito e Mozicho (apenas gasto)
+  const [proporcional,setProporcional]=useState(false);
+  const [pctLindito,setPctLindito]=useState('50');
   // Cofrinho (depósito)
   const [cofrinho,setCofrinho]=useState(getCofrinhoNames()[0]||'');
   const [cofreVersion,setCofreVersion]=useState(0);
@@ -1345,6 +1358,17 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
     } else {
       if(!desc)return;
       const pay={forma,instituicao};
+      // Rateio proporcional: divide cada lançamento entre Lindito e Mozicho
+      const pctL=Math.max(0,Math.min(100,parseInt(pctLindito)||0));
+      const splitEntry=(e)=>{
+        if(!proporcional)return[e];
+        const valL=+(e.valor*pctL/100).toFixed(2);
+        const valM=+(e.valor-valL).toFixed(2);
+        const out=[];
+        if(valL>0)out.push({...e,deQuem:'Lindito',valor:valL});
+        if(valM>0)out.push({...e,deQuem:'Mozicho',valor:valM});
+        return out.length?out:[e];
+      };
       // Gastos recorrentes
       if(recorrenteGasto){
         const [py,pm]=date.slice(0,7).split('-').map(Number);
@@ -1365,7 +1389,7 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
           const dateStr=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(useDia).padStart(2,'0')}`;
           entries.push({date:dateStr,desc:`${desc} (${i+1}/${n})`,valor:v,categoria:cat,deQuem,quemPagou:pago,...pay,_recurrentId:recorrenteId,_recurrentNum:i+1,_recurrentTotal:n});
         }
-        onSave(entries);
+        onSave(entries.flatMap(splitEntry));
       } else if(parcelado){
         const n=Math.max(1,parseInt(nParc)||1);
         const valorParcela=valorTipo==='total'?+(v/n).toFixed(2):v;
@@ -1379,9 +1403,9 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
           const dateStr=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(useDia).padStart(2,'0')}`;
           entries.push({date:dateStr,desc:`${desc} (${i+1}/${n})`,valor:valorParcela,categoria:cat,deQuem,quemPagou:pago,...pay});
         }
-        onSave(entries);
+        onSave(entries.flatMap(splitEntry));
       } else {
-        onSave({date,desc,valor:v,categoria:cat,deQuem,quemPagou:pago,...pay});
+        onSave(splitEntry({date,desc,valor:v,categoria:cat,deQuem,quemPagou:pago,...pay}));
       }
     }
     onClose();
@@ -1503,7 +1527,7 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
           </div>
         )}
 
-        {mode!=='quitacao'&&(
+        {mode!=='quitacao'&&!(mode==='gasto'&&proporcional)&&(
           <div className="field">
             <div className="fl">{mode==='receita'?'De quem?':'De quem?'}</div>
             <div className="chip-row">
@@ -1522,6 +1546,49 @@ function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatSt
                 <button key={p} className={`chip ${PERSON_CLS[p]} ${pago===p?'active':''}`} onClick={()=>setPago(p)}>{p}</button>
               ))}
             </div>
+          </div>
+        )}
+
+        {mode==='gasto'&&(
+          <div className="field">
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 14px',background:proporcional?'var(--accent-bg)':'var(--bg3)',border:`1.5px solid ${proporcional?'var(--accent)':'var(--border)'}`,borderRadius:12,cursor:'pointer'}} onClick={()=>setProporcional(p=>!p)}>
+              <div>
+                <div style={{fontSize:13,fontWeight:700,color:proporcional?'var(--accent)':'var(--text)'}}>⚖️ Dividir proporcional</div>
+                <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>{proporcional?'O valor é rateado entre os dois pela % escolhida':'Marque para dividir, ex: 70% Lindito / 30% Mozicho'}</div>
+              </div>
+              <div style={{width:42,height:24,borderRadius:12,background:proporcional?'var(--accent)':'var(--border2)',position:'relative',transition:'background 0.15s',flexShrink:0}}>
+                <div style={{position:'absolute',top:2,left:proporcional?20:2,width:20,height:20,borderRadius:10,background:'#fff',transition:'left 0.15s',boxShadow:'0 1px 3px rgba(0,0,0,0.2)'}}></div>
+              </div>
+            </div>
+            {proporcional&&(()=>{
+              const pctL=Math.max(0,Math.min(100,parseInt(pctLindito)||0));
+              const pctM=100-pctL;
+              const total=evalCalcExpr(valor)||0;
+              return(
+                <div style={{marginTop:12,padding:14,background:'var(--bg3)',borderRadius:12,border:'1px solid var(--border)'}}>
+                  <div className="fl" style={{marginBottom:8}}>% para o Lindito (o restante vai para a Mozicho)</div>
+                  <div style={{display:'flex',alignItems:'center',gap:12}}>
+                    <input type="range" min="0" max="100" step="5" value={pctL} onChange={e=>setPctLindito(e.target.value)} style={{flex:1,accentColor:PERSON_COLOR.Lindito}}/>
+                    <div style={{width:64,flexShrink:0}}>
+                      <input className="fi" type="number" min="0" max="100" value={pctLindito} onChange={e=>setPctLindito(e.target.value)} style={{padding:'8px',fontSize:14,textAlign:'center'}}/>
+                    </div>
+                  </div>
+                  <div style={{display:'flex',gap:8,marginTop:12}}>
+                    <div style={{flex:1,padding:'10px 12px',borderRadius:10,background:'var(--lin-bg)',border:'1px solid var(--lin-border)'}}>
+                      <div style={{fontSize:11,fontWeight:700,color:'var(--lin)'}}>Lindito · {pctL}%</div>
+                      <div style={{fontSize:15,fontWeight:800,color:'var(--lin)'}}>{fmt(+(total*pctL/100).toFixed(2))}</div>
+                    </div>
+                    <div style={{flex:1,padding:'10px 12px',borderRadius:10,background:'var(--moz-bg)',border:'1px solid var(--moz-border)'}}>
+                      <div style={{fontSize:11,fontWeight:700,color:'var(--moz)'}}>Mozicho · {pctM}%</div>
+                      <div style={{fontSize:15,fontWeight:800,color:'var(--moz)'}}>{fmt(+(total-+(total*pctL/100).toFixed(2)).toFixed(2))}</div>
+                    </div>
+                  </div>
+                  <div style={{marginTop:8,fontSize:11,color:'var(--text2)',lineHeight:1.5}}>
+                    Serão criados 2 lançamentos (um por pessoa). O “De quem?” acima é ignorado quando o rateio está ativo.
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -1940,6 +2007,166 @@ function MultiCatTrend({data,pessoa,allMs}){
   );
 }
 
+// ── Desempenho de itens dentro de uma categoria ────────────────────────────────
+// Ao escolher uma categoria (ex: Moradia), mostra cada item/descrição (Aluguel,
+// Condomínio, Internet, Copel, Gás…) como uma linha, com o histórico mês a mês.
+const ITEM_PALETTE=['#6c47ff','#0a9e6e','#e8450a','#3d6ef5','#d97706','#db2777','#0891b2','#16a34a','#7c3aed','#dc2626'];
+function normalizeDesc(s){
+  return String(s||'').replace(/\s*\(\d+\/\d+\)\s*$/,'').trim()||'(sem descrição)';
+}
+function CategoriaItensTrend({data,pessoa,allMs}){
+  const nowMk=currentMk();
+  const realMonths=allMs.filter(m=>m<=nowMk).slice().reverse();
+  const [range,setRange]=useState(12);
+  const [selCat,setSelCat]=useState('');
+  const [hidden,setHidden]=useState({}); // itens ocultos no gráfico
+  const touched=useRef(false);
+
+  const share=(r)=>{
+    if(pessoa==='Conjunto')return r.valor;
+    if(r.deQuem===pessoa)return r.valor;
+    if(r.deQuem==='Conjunto')return r.valor/2;
+    return 0;
+  };
+
+  // Categorias disponíveis ordenadas por total
+  const totalByCat=useMemo(()=>{
+    const map={};
+    for(const r of data){
+      if(NON_GASTO.has(r.categoria))continue;
+      const s=share(r);
+      if(s>0)map[r.categoria]=(map[r.categoria]||0)+s;
+    }
+    return map;
+  },[data,pessoa]);
+  const availCats=Object.entries(totalByCat).sort((a,b)=>b[1]-a[1]).map(([c])=>c);
+
+  // Seleção inicial: maior categoria
+  useEffect(()=>{
+    if(!touched.current&&!selCat&&availCats.length>0)setSelCat(availCats[0]);
+  },[totalByCat]);
+
+  if(realMonths.length<2)return null;
+  const windowMonths=range==='all'?realMonths:realMonths.slice(-range);
+
+  // Agrupa itens (por descrição normalizada) dentro da categoria escolhida
+  const itemTotals={};
+  for(const r of data){
+    if(r.categoria!==selCat)continue;
+    const s=share(r);
+    if(s<=0)continue;
+    const key=normalizeDesc(r.desc);
+    itemTotals[key]=(itemTotals[key]||0)+s;
+  }
+  const itemsSorted=Object.entries(itemTotals).sort((a,b)=>b[1]-a[1]).map(([k])=>k);
+  const topItems=itemsSorted.slice(0,8); // limita para não poluir
+
+  const sumItem=(item,m)=>{
+    let t=0;
+    for(const r of data){
+      if(r.categoria!==selCat)continue;
+      if(toMk(r.date)!==m)continue;
+      if(normalizeDesc(r.desc)!==item)continue;
+      t+=share(r);
+    }
+    return t;
+  };
+
+  const series=topItems.filter(it=>!hidden[it]).map((item,i)=>({
+    item,
+    color:ITEM_PALETTE[topItems.indexOf(item)%ITEM_PALETTE.length],
+    pts:windowMonths.map(m=>sumItem(item,m)),
+  }));
+
+  const maxVal=Math.max(1,...series.flatMap(s=>s.pts));
+  const w=320,h=160,padL=10,padR=10,padT=14,padB=26;
+  const plotW=w-padL-padR,plotH=h-padT-padB;
+  const xFor=(idx)=>padL+(windowMonths.length<=1?plotW/2:(idx/(windowMonths.length-1))*plotW);
+  const yFor=(val)=>padT+plotH-(val/maxVal)*plotH;
+
+  return(
+    <div className="card" style={{marginBottom:12,padding:'16px 14px'}}>
+      <div style={{fontSize:11,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:10}}>
+        🔎 Itens dentro de uma categoria
+      </div>
+
+      {/* Escolha da categoria */}
+      <div style={{position:'relative',marginBottom:10}}>
+        <select value={selCat} onChange={e=>{touched.current=true;setSelCat(e.target.value);setHidden({});}} style={{
+          width:'100%',padding:'10px 32px 10px 12px',background:'var(--bg2)',
+          border:'1.5px solid var(--accent)',borderRadius:12,fontSize:13,fontWeight:700,
+          color:'var(--accent)',outline:'none',appearance:'none',cursor:'pointer'
+        }}>
+          {availCats.length===0&&<option value="">Sem dados</option>}
+          {availCats.map(c=><option key={c} value={c}>{getCatEmoji(c)} {c}</option>)}
+        </select>
+        <span style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',pointerEvents:'none',fontSize:10,color:'var(--text2)'}}>▼</span>
+      </div>
+
+      {/* Período */}
+      <div style={{display:'flex',gap:6,marginBottom:12}}>
+        {[[6,'6 meses'],[12,'12 meses'],['all','Tudo']].map(([val,lbl])=>(
+          <button key={val} onClick={()=>setRange(val)} style={{
+            flex:1,padding:'6px 4px',borderRadius:8,fontSize:11,fontWeight:700,
+            background:range===val?'var(--accent)':'var(--bg3)',
+            color:range===val?'#fff':'var(--text2)',
+            border:`1px solid ${range===val?'var(--accent)':'var(--border)'}`
+          }}>{lbl}</button>
+        ))}
+      </div>
+
+      {topItems.length===0?(
+        <div style={{textAlign:'center',color:'var(--text3)',padding:'24px 0',fontSize:13}}>
+          {availCats.length===0?'Sem gastos para exibir.':'Nenhum item nessa categoria ainda.'}
+        </div>
+      ):(
+        <>
+          <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`}>
+            <line x1={padL} y1={padT+plotH} x2={w-padR} y2={padT+plotH} stroke="var(--border)" strokeWidth="1"/>
+            <line x1={padL} y1={padT} x2={w-padR} y2={padT} stroke="var(--border)" strokeWidth="1" strokeDasharray="3 3" opacity="0.4"/>
+            <text x={w-padR} y={padT-3} textAnchor="end" fontSize="8" fill="var(--text3)" fontFamily="Plus Jakarta Sans">{fmtK(maxVal)}</text>
+            {series.map((s)=>{
+              const screenPts=s.pts.map((v,i)=>({x:xFor(i),y:yFor(v),v,m:windowMonths[i]}));
+              return(
+                <g key={s.item}>
+                  {screenPts.length>1&&(
+                    <polyline points={screenPts.map(p=>`${p.x},${p.y}`).join(' ')} fill="none" stroke={s.color} strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+                  )}
+                  {screenPts.map((p,i)=>(
+                    <g key={i}><circle cx={p.x} cy={p.y} r="3" fill={s.color}/><title>{s.item} · {mlabel(p.m)}: {fmt(p.v)}</title></g>
+                  ))}
+                </g>
+              );
+            })}
+            {windowMonths.map((m,i)=>{
+              const showLabel=windowMonths.length<=8||i%Math.ceil(windowMonths.length/8)===0||i===windowMonths.length-1;
+              if(!showLabel)return null;
+              return<text key={i} x={xFor(i)} y={h-8} textAnchor="middle" fontSize="9" fill="var(--text2)" fontFamily="Plus Jakarta Sans">{mlabelShort(m)}</text>;
+            })}
+          </svg>
+
+          {/* Legenda dos itens (clique para mostrar/ocultar) */}
+          <div style={{display:'flex',flexDirection:'column',gap:6,marginTop:10}}>
+            {topItems.map((item,i)=>{
+              const tot=windowMonths.reduce((a,m)=>a+sumItem(item,m),0);
+              const isHidden=!!hidden[item];
+              const color=ITEM_PALETTE[i%ITEM_PALETTE.length];
+              return(
+                <button key={item} onClick={()=>setHidden(h=>({...h,[item]:!h[item]}))} style={{display:'flex',alignItems:'center',gap:8,fontSize:12,background:'none',border:'none',padding:0,textAlign:'left',opacity:isHidden?0.4:1,cursor:'pointer'}}>
+                  <span style={{width:12,height:3,borderRadius:2,background:color,flexShrink:0}}></span>
+                  <span style={{flex:1,color:'var(--text2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{item}</span>
+                  <span style={{fontWeight:700,color}}>{fmtK(tot)}</span>
+                </button>
+              );
+            })}
+            {itemsSorted.length>8&&<div style={{fontSize:10.5,color:'var(--text3)',marginTop:2}}>Mostrando os 8 itens com maior gasto.</div>}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Home Screen ───────────────────────────────────────────────────────────────
 function Home({data,pessoa,setPessoa,budgetData,setBudgetData,cofrinhoData=[],syncStatus,syncBudgetToSheets,saveMetasToSheets,onRefresh,onAddReceita}){
   const [selM,setSelM]=useState(today().slice(0,7));
@@ -1958,9 +2185,16 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,cofrinhoData=[],sy
   const receitasAuto=totalReceita(rows,pessoa);
   const totalIncome=baseBudget+extrasTotal+receitasAuto;
   const gasto=totalPessoa(rows,pessoa);
-  // Cofrinhos do mês: depósitos reduzem o disponível, retiradas devolvem ao disponível
-  const cofMesDep=cofrinhoData.filter(c=>toMk(c.date)===selM&&c.tipo!=='Retirada').reduce((s,c)=>s+c.valor,0);
-  const cofMesRet=cofrinhoData.filter(c=>toMk(c.date)===selM&&c.tipo==='Retirada').reduce((s,c)=>s+c.valor,0);
+  // Cofrinhos do mês: depósitos reduzem o disponível, retiradas devolvem ao disponível.
+  // O rateio segue a mesma lógica dos gastos (Conjunto = metade para cada pessoa).
+  const cofShare=(c)=>{
+    if(pessoa==='Conjunto')return c.valor;
+    if(c.deQuem===pessoa)return c.valor;
+    if(c.deQuem==='Conjunto'||!c.deQuem)return c.valor/2;
+    return 0;
+  };
+  const cofMesDep=cofrinhoData.filter(c=>toMk(c.date)===selM&&c.tipo!=='Retirada').reduce((s,c)=>s+cofShare(c),0);
+  const cofMesRet=cofrinhoData.filter(c=>toMk(c.date)===selM&&c.tipo==='Retirada').reduce((s,c)=>s+cofShare(c),0);
   // Disponível considera também o que foi guardado/retirado dos cofrinhos no mês
   const restante=totalIncome>0?totalIncome-gasto-cofMesDep+cofMesRet:0;
   const over=totalIncome>0&&(gasto+cofMesDep-cofMesRet)>totalIncome;
@@ -2531,6 +2765,7 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,cofrinhoData=[],sy
 
       {/* Dashboard dinâmico: várias categorias como linhas no mesmo gráfico */}
       <MultiCatTrend data={data} pessoa={pessoa} allMs={allMs}/>
+      <CategoriaItensTrend data={data} pessoa={pessoa} allMs={allMs}/>
 
       {/* Recentes */}
       <div className="card" style={{padding:'16px 14px'}}>
@@ -2560,11 +2795,11 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,cofrinhoData=[],sy
             return<div style={{textAlign:'center',color:'var(--text3)',padding:'16px 0',fontSize:13}}>Nenhum lançamento nos 10 dias antes ou depois de hoje</div>;
           }
           return(
-            <div style={{maxHeight:320,overflowY:'auto',WebkitOverflowScrolling:'touch'}}>
+            <div>
               {recentes.map((r,i,arr)=>(
                 <div key={r._row||`${r.date}-${i}`} style={{display:'flex',alignItems:'center',gap:10,padding:'10px 0',borderBottom:i<arr.length-1?'1px solid var(--border)':'none'}}>
-                  <div style={{width:36,height:36,borderRadius:10,background:(CAT_COLOR[r.categoria]||'#555')+'18',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17,flexShrink:0}}>
-                    {CAT_EMOJI[r.categoria]||'📌'}
+                  <div style={{width:36,height:36,borderRadius:10,background:getCatColor(r.categoria)+'18',display:'flex',alignItems:'center',justifyContent:'center',fontSize:17,flexShrink:0}}>
+                    {getCatEmoji(r.categoria)}
                   </div>
                   <div style={{flex:1,minWidth:0}}>
                     <div style={{fontSize:13,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{r.desc}</div>
@@ -2579,7 +2814,7 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,cofrinhoData=[],sy
       </div>
       <div style={{height:8}}></div>
       {showBudget&&<OrcamentoModal onClose={()=>setShowBudget(false)} budgets={monthBudget.budgets} extras={monthBudget.extras} onSave={saveBudget} monthKey={selM} hasSheetsSync={typeof syncBudgetToSheets==='function'}/>}
-      {showMetas&&<MetasModal onClose={()=>setShowMetas(false)} monthKey={selM} metas={metas} sugeridas={(budgetData[addMonths(selM,-1)]||{}).metas||{}} onSave={(m)=>{if(typeof saveMetasToSheets==='function')saveMetasToSheets(selM,m);}}/>}
+      {showMetas&&<MetasModal onClose={()=>setShowMetas(false)} monthKey={selM} allMetas={Object.fromEntries(Object.entries(budgetData).map(([k,v])=>[k,(v&&v.metas)||{}]))} sugeridas={(budgetData[addMonths(selM,-1)]||{}).metas||{}} onSave={(m,months)=>{if(typeof saveMetasToSheets==='function')saveMetasToSheets(months,m);}}/>}
     </div>
   );
 }
@@ -3075,38 +3310,71 @@ function CategoriasModal({onClose,onChange,data}){
 }
 
 // ── Modal de Estimativas (metas de gasto por categoria no mês) ─────────────────
-function MetasModal({onClose,monthKey,metas,onSave,sugeridas}){
+function MetasModal({onClose,monthKey,allMetas,onSave,sugeridas}){
   useBackButton(onClose,'metas');
-  // Estado: {categoria: "valor decimal string"}. Se o mês não tiver metas ainda,
-  // sugere os valores do mês anterior (sugeridas) como ponto de partida.
-  const init={};
-  for(const c of getCats()){
-    const v=(metas&&metas[c]!=null&&metas[c]!=='')?metas[c]:(sugeridas&&sugeridas[c]);
-    init[c]=(v!=null&&v!=='')?String(v):'';
-  }
-  const [vals,setVals]=useState(init);
+  // allMetas: mapa { 'YYYY-MM': {categoria: valor} } com as metas já salvas
+  const getMetasFor=(mk)=>(allMetas&&allMetas[mk])||{};
+  const [mes,setMes]=useState(monthKey);
+  const [replicar,setReplicar]=useState(false);
+  const [nRepl,setNRepl]=useState('3');
+  // Monta os valores iniciais do mês selecionado (ou sugestão se vazio)
+  const buildVals=(mk)=>{
+    const m=getMetasFor(mk);
+    const temAlgum=Object.keys(m).length>0;
+    const fonte=temAlgum?m:(sugeridas||{});
+    const o={};
+    for(const c of getCats()){
+      const v=fonte[c];
+      o[c]=(v!=null&&v!=='')?String(v):'';
+    }
+    return o;
+  };
+  const [vals,setVals]=useState(()=>buildVals(monthKey));
+  // Ao trocar o mês, recarrega os valores daquele mês
+  useEffect(()=>{setVals(buildVals(mes));},[mes]);
+
   const cats=getCats().slice().sort((a,b)=>a.localeCompare(b,'pt-BR'));
   const total=Object.values(vals).reduce((s,v)=>s+(parseFloat(String(v).replace(',','.'))||0),0);
   function set(c,v){setVals(o=>({...o,[c]:v}));}
+
+  // Lista de meses para escolher: de 3 meses atrás até 12 meses à frente
+  const monthOpts=[];
+  for(let i=-3;i<=12;i++)monthOpts.push(addMonths(currentMk(),i));
+
   function salvar(){
     const out={};
     for(const c of Object.keys(vals)){
       const n=parseFloat(String(vals[c]).replace(',','.'))||0;
       if(n>0)out[c]=n;
     }
-    onSave(out);
+    let targets=[mes];
+    if(replicar){
+      const n=Math.max(1,parseInt(nRepl)||1);
+      for(let i=1;i<=n;i++)targets.push(addMonths(mes,i));
+    }
+    onSave(out,targets);
     onClose();
   }
+
   return(
     <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal">
         <button className="modal-x" onClick={onClose} aria-label="Fechar">×</button>
         <div className="modal-handle"></div>
-        <div className="modal-title">🎯 Estimativas · {mlabel(monthKey)}</div>
-        <div style={{padding:'0 20px 12px',fontSize:13,color:'var(--text2)',lineHeight:1.5}}>
-          Defina quanto pretende gastar em cada categoria neste mês. Deixe em branco as que não quer acompanhar.
+        <div className="modal-title">🎯 Estimativas de gasto</div>
+        <div className="field">
+          <div className="fl">Mês</div>
+          <div style={{position:'relative'}}>
+            <select value={mes} onChange={e=>setMes(e.target.value)} style={{width:'100%',padding:'10px 32px 10px 12px',background:'var(--bg2)',border:'1.5px solid var(--accent)',borderRadius:12,fontSize:13,fontWeight:700,color:'var(--accent)',outline:'none',appearance:'none',cursor:'pointer'}}>
+              {monthOpts.map(mk=><option key={mk} value={mk}>{mlabel(mk)}{Object.keys(getMetasFor(mk)).length>0?' ✓':''}</option>)}
+            </select>
+            <span style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',pointerEvents:'none',fontSize:10,color:'var(--text2)'}}>▼</span>
+          </div>
         </div>
-        <div style={{padding:'0 20px',maxHeight:'52vh',overflowY:'auto'}}>
+        <div style={{padding:'0 20px 8px',fontSize:13,color:'var(--text2)',lineHeight:1.5}}>
+          Defina quanto pretende gastar em cada categoria. Deixe em branco as que não quer acompanhar.
+        </div>
+        <div style={{padding:'0 20px'}}>
           {cats.map(c=>(
             <div key={c} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderBottom:'1px solid var(--border)'}}>
               <div style={{width:34,height:34,borderRadius:9,background:getCatColor(c)+'22',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,flexShrink:0}}>{getCatEmoji(c)}</div>
@@ -3120,6 +3388,27 @@ function MetasModal({onClose,monthKey,metas,onSave,sugeridas}){
         <div style={{padding:'12px 20px 0',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
           <span style={{fontSize:13,fontWeight:700,color:'var(--text2)'}}>Total estimado</span>
           <span style={{fontSize:18,fontWeight:800,color:'var(--accent)'}}>{fmt(total)}</span>
+        </div>
+        {/* Replicar para os próximos meses */}
+        <div className="field" style={{paddingTop:14}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'12px 14px',background:replicar?'var(--accent-bg)':'var(--bg3)',border:`1.5px solid ${replicar?'var(--accent)':'var(--border)'}`,borderRadius:12,cursor:'pointer'}} onClick={()=>setReplicar(p=>!p)}>
+            <div>
+              <div style={{fontSize:13,fontWeight:700,color:replicar?'var(--accent)':'var(--text)'}}>🔁 Replicar para os próximos meses</div>
+              <div style={{fontSize:11,color:'var(--text2)',marginTop:2}}>{replicar?'As mesmas estimativas serão salvas nos próximos meses':'Use as mesmas estimativas em meses futuros'}</div>
+            </div>
+            <div style={{width:42,height:24,borderRadius:12,background:replicar?'var(--accent)':'var(--border2)',position:'relative',transition:'background 0.15s',flexShrink:0}}>
+              <div style={{position:'absolute',top:2,left:replicar?20:2,width:20,height:20,borderRadius:10,background:'#fff',transition:'left 0.15s',boxShadow:'0 1px 3px rgba(0,0,0,0.2)'}}></div>
+            </div>
+          </div>
+          {replicar&&(
+            <div style={{marginTop:12,padding:14,background:'var(--bg3)',borderRadius:12,border:'1px solid var(--border)'}}>
+              <div className="fl" style={{marginBottom:6}}>Quantos meses à frente?</div>
+              <input className="fi" type="number" min="1" max="24" value={nRepl} onChange={e=>setNRepl(e.target.value)} style={{padding:'10px 12px',fontSize:14}}/>
+              <div style={{marginTop:8,fontSize:12,color:'var(--text2)'}}>
+                Salva de <strong style={{color:'var(--accent)'}}>{mlabel(mes)}</strong> até <strong style={{color:'var(--accent)'}}>{mlabel(addMonths(mes,Math.max(1,parseInt(nRepl)||1)))}</strong> ({Math.max(1,parseInt(nRepl)||1)+1} meses).
+              </div>
+            </div>
+          )}
         </div>
         <button className="btn" onClick={salvar}>Salvar estimativas</button>
       </div>
@@ -3165,30 +3454,36 @@ function RetiradaModal({onClose,cofrinho,saldo,onConfirm}){
 function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
   const [retirar,setRetirar]=useState(null); // nome do cofrinho a retirar
   const [openJar,setOpenJar]=useState(null); // cofrinho com histórico aberto
+  const [pf,setPf]=useState('Conjunto'); // filtro por pessoa: Conjunto | Lindito | Mozicho
 
-  // Agrega saldos por cofrinho
+  // Filtra as movimentações pela pessoa selecionada (vazio = Conjunto)
+  const filtered=cofrinhoData.filter(t=>(t.deQuem||'Conjunto')===pf);
+
+  // Agrega saldos por cofrinho (somente da pessoa filtrada)
   const jars={};
-  for(const t of cofrinhoData){
+  for(const t of filtered){
     if(!jars[t.cofrinho])jars[t.cofrinho]={nome:t.cofrinho,saldo:0,dep:0,ret:0,txs:[]};
     const j=jars[t.cofrinho];
     if(t.tipo==='Retirada'){j.saldo-=t.valor;j.ret+=t.valor;}
     else{j.saldo+=t.valor;j.dep+=t.valor;}
     j.txs.push(t);
   }
-  // Inclui cofrinhos cadastrados mas ainda sem movimentação
-  for(const nome of getCofrinhoNames()){
-    if(!jars[nome])jars[nome]={nome,saldo:0,dep:0,ret:0,txs:[]};
+  // No filtro "Conjunto", inclui também os cofrinhos cadastrados ainda sem movimentação
+  if(pf==='Conjunto'){
+    for(const nome of getCofrinhoNames()){
+      if(!jars[nome])jars[nome]={nome,saldo:0,dep:0,ret:0,txs:[]};
+    }
   }
   const jarList=Object.values(jars).sort((a,b)=>b.saldo-a.saldo);
   const totalGuardado=jarList.reduce((s,j)=>s+j.saldo,0);
 
-  // Evolução acumulada no tempo (todos os cofrinhos somados), por mês
-  const allMonths=[...new Set(cofrinhoData.map(t=>toMk(t.date)).filter(Boolean))].sort();
+  // Evolução acumulada no tempo (cofrinhos da pessoa filtrada), por mês
+  const allMonths=[...new Set(filtered.map(t=>toMk(t.date)).filter(Boolean))].sort();
   const evoPts=[];
   let acc=0;
   for(const m of allMonths){
-    const mdep=cofrinhoData.filter(t=>toMk(t.date)===m&&t.tipo!=='Retirada').reduce((s,t)=>s+t.valor,0);
-    const mret=cofrinhoData.filter(t=>toMk(t.date)===m&&t.tipo==='Retirada').reduce((s,t)=>s+t.valor,0);
+    const mdep=filtered.filter(t=>toMk(t.date)===m&&t.tipo!=='Retirada').reduce((s,t)=>s+t.valor,0);
+    const mret=filtered.filter(t=>toMk(t.date)===m&&t.tipo==='Retirada').reduce((s,t)=>s+t.valor,0);
     acc+=mdep-mret;
     evoPts.push({m,total:acc});
   }
@@ -3203,8 +3498,19 @@ function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
         </div>
       </div>
 
+      {/* Filtro por pessoa */}
+      <div style={{display:'flex',gap:8,marginBottom:12}}>
+        {['Conjunto','Lindito','Mozicho'].map(p=>{
+          const on=pf===p;
+          const col=p==='Conjunto'?'var(--conj)':p==='Lindito'?'var(--lin)':'var(--moz)';
+          return(
+            <button key={p} onClick={()=>{setPf(p);setOpenJar(null);}} style={{flex:1,padding:'9px 4px',borderRadius:12,fontSize:13,fontWeight:700,background:on?col:'var(--bg3)',color:on?'#fff':'var(--text2)',border:`1.5px solid ${on?col:'var(--border)'}`}}>{p}</button>
+          );
+        })}
+      </div>
+
       <div className="card" style={{marginBottom:12,background:'linear-gradient(135deg,#fff7ed,var(--bg2))',borderLeft:'4px solid var(--amber)'}}>
-        <div style={{fontSize:11,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:4}}>Total guardado</div>
+        <div style={{fontSize:11,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:4}}>Total guardado · {pf}</div>
         <div style={{fontSize:34,fontWeight:800,color:'var(--amber)'}}>{fmt(totalGuardado)}</div>
         <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>{jarList.length} cofrinho{jarList.length!==1?'s':''}</div>
       </div>
@@ -3276,7 +3582,7 @@ function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
           cofrinho={retirar}
           saldo={(jars[retirar]||{}).saldo||0}
           onClose={()=>setRetirar(null)}
-          onConfirm={(v,desc)=>onWithdraw({date:today(),cofrinho:retirar,tipo:'Retirada',valor:v,deQuem:'',desc:desc||`Retirada de ${retirar}`})}
+          onConfirm={(v,desc)=>onWithdraw({date:today(),cofrinho:retirar,tipo:'Retirada',valor:v,deQuem:pf,desc:desc||`Retirada de ${retirar}`})}
         />
       )}
     </div>
@@ -3478,15 +3784,18 @@ function App(){
     }
   }
 
-  // Salva as estimativas (metas) de gasto por categoria do mês
-  async function saveMetasToSheets(monthKey,metas){
+  // Salva as estimativas (metas) de gasto por categoria em um ou vários meses
+  async function saveMetasToSheets(months,metas){
     if(!db){showToast('Faça login no Google para salvar.','err');return;}
+    const list=Array.isArray(months)?months:[months];
     setSyncStatus('syncing');
     try{
-      await db.saveMetas(monthKey,metas);
+      for(const mk of list){
+        await db.saveMetas(mk,metas);
+      }
       await syncBudgetsFromSheets();
       setSyncStatus('ok');
-      showToast('🎯 Estimativas salvas na planilha!');
+      showToast(list.length>1?`🎯 Estimativas salvas em ${list.length} meses!`:'🎯 Estimativas salvas na planilha!');
     }catch(e){
       setSyncStatus('error');
       showToast('Erro ao salvar estimativas.','err');
