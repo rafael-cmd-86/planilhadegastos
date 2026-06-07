@@ -153,6 +153,70 @@ function ALL_CATS_NOW(){return getAllCats();}
 // Categorias que NÃO são gastos (não entram em cálculo de "gasto" / "disponível")
 const NON_GASTO=new Set(['Quitação','Receita']);
 
+// ── Formas de pagamento e instituições (editáveis pelo usuário) ────────────────
+const DEFAULT_FORMAS=['Pix','Débito','Crédito'];
+const DEFAULT_INSTITUICOES=['Nubank','Itaú','Bradesco','Picpay','Mercado Pago','Amazon','Recarpay','Caju'];
+function loadPayStore(){
+  try{
+    const s=JSON.parse(localStorage.getItem('gastos_pay_v1')||'null');
+    if(s&&Array.isArray(s.formas)&&Array.isArray(s.instituicoes))return s;
+  }catch{}
+  return{formas:[...DEFAULT_FORMAS],instituicoes:[...DEFAULT_INSTITUICOES]};
+}
+function savePayStore(s){localStorage.setItem('gastos_pay_v1',JSON.stringify(s));}
+let PAY_STORE=loadPayStore();
+function getFormas(){return PAY_STORE.formas;}
+function getInstituicoes(){return PAY_STORE.instituicoes;}
+function addForma(v){const t=(v||'').trim();if(!t||PAY_STORE.formas.includes(t))return;PAY_STORE.formas.push(t);savePayStore(PAY_STORE);}
+function addInstituicao(v){const t=(v||'').trim();if(!t||PAY_STORE.instituicoes.includes(t))return;PAY_STORE.instituicoes.push(t);savePayStore(PAY_STORE);}
+
+// ── Cofrinhos: nomes salvos localmente para seleção rápida ─────────────────────
+const DEFAULT_COFRINHOS=['Investimento','Viagens','Móveis novos','Reserva de emergência'];
+function loadCofreStore(){
+  try{
+    const s=JSON.parse(localStorage.getItem('gastos_cofrinhos_v1')||'null');
+    if(s&&Array.isArray(s))return s;
+  }catch{}
+  return[...DEFAULT_COFRINHOS];
+}
+function saveCofreStore(list){localStorage.setItem('gastos_cofrinhos_v1',JSON.stringify(list));}
+let COFRE_STORE=loadCofreStore();
+function getCofrinhoNames(){return COFRE_STORE;}
+function addCofrinhoName(v){const t=(v||'').trim();if(!t||COFRE_STORE.includes(t))return;COFRE_STORE.push(t);saveCofreStore(COFRE_STORE);}
+
+// ── Input de moeda com máscara (estilo banco: digita só números) ───────────────
+// O valor é montado da direita para a esquerda: os 2 últimos dígitos são centavos.
+// Exibe no padrão brasileiro (1.234,56). O valor armazenado em `value` é uma
+// string decimal com ponto (ex: "1234.56") para os cálculos.
+function fmtMoneyMask(numStr){
+  const n=Number(numStr);
+  if(!numStr||isNaN(n))return'';
+  return n.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function CurrencyInput({value,onChange,inputRef,className='val-input',placeholder='0,00',style}){
+  const display=fmtMoneyMask(value);
+  function handle(e){
+    const digits=(e.target.value||'').replace(/\D/g,'');
+    if(!digits){onChange('');return;}
+    // Limita para evitar overflow visual
+    const trimmed=digits.slice(0,12);
+    const cents=parseInt(trimmed,10);
+    onChange((cents/100).toFixed(2));
+  }
+  return(
+    <input
+      ref={inputRef}
+      className={className}
+      type="text"
+      inputMode="numeric"
+      placeholder={placeholder}
+      value={display}
+      onChange={handle}
+      style={style}
+    />
+  );
+}
+
 // ── Sheets API ────────────────────────────────────────────────────────────────
 const SHEETS_SCOPE='https://www.googleapis.com/auth/spreadsheets';
 const SHEET_NAME='Base de dados';
@@ -169,7 +233,8 @@ class SheetsDB {
     // valueRenderOption=FORMATTED_VALUE garante que datas vêm como string formatada pela célula
     // (ex: "01/10/2025") em vez de serial number, independente da formatação da célula.
     // dateTimeRenderOption não é necessário com FORMATTED_VALUE mas reforça o comportamento.
-    const r=await fetch(`${this.base}/values/${SHEET_NAME}!A:F?valueRenderOption=FORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`,{headers:this.headers()});
+    // Colunas: A Data | B Descrição | C Valor | D Categoria | E De quem | F Quem pagou | G Forma de pagamento | H Instituição
+    const r=await fetch(`${this.base}/values/${SHEET_NAME}!A:H?valueRenderOption=FORMATTED_VALUE&dateTimeRenderOption=FORMATTED_STRING`,{headers:this.headers()});
     if(!r.ok)throw new Error(await r.text());
     const d=await r.json();
     const rows=d.values||[];
@@ -181,14 +246,16 @@ class SheetsDB {
       valor:parseValor(r[2]),
       categoria:r[3]||'',
       deQuem:r[4]||'',
-      quemPagou:r[5]||''
+      quemPagou:r[5]||'',
+      forma:r[6]||'',
+      instituicao:r[7]||''
     }));
   }
 
   async append(entry){
     const dateBR=fmtDate(entry.date);
-    const row=[[dateBR,entry.desc,entry.valor,entry.categoria,entry.deQuem,entry.quemPagou]];
-    const r=await fetch(`${this.base}/values/${SHEET_NAME}!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
+    const row=[[dateBR,entry.desc,valorToSheet(entry.valor),entry.categoria,entry.deQuem,entry.quemPagou,entry.forma||'',entry.instituicao||'']];
+    const r=await fetch(`${this.base}/values/${SHEET_NAME}!A:H:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
       method:'POST',headers:this.headers(),
       body:JSON.stringify({values:row})
     });
@@ -198,8 +265,8 @@ class SheetsDB {
 
   async update(rowNum, entry){
     const dateBR=fmtDate(entry.date);
-    const row=[[dateBR,entry.desc,entry.valor,entry.categoria,entry.deQuem,entry.quemPagou]];
-    const r=await fetch(`${this.base}/values/${SHEET_NAME}!A${rowNum}:F${rowNum}?valueInputOption=USER_ENTERED`,{
+    const row=[[dateBR,entry.desc,valorToSheet(entry.valor),entry.categoria,entry.deQuem,entry.quemPagou,entry.forma||'',entry.instituicao||'']];
+    const r=await fetch(`${this.base}/values/${SHEET_NAME}!A${rowNum}:H${rowNum}?valueInputOption=USER_ENTERED`,{
       method:'PUT',headers:this.headers(),
       body:JSON.stringify({values:row})
     });
@@ -221,7 +288,7 @@ class SheetsDB {
   }
 
   // ── Budget sheet helpers ──────────────────────────────────────────────────────
-  // Aba "Orçamentos" com colunas: Mês | Renda Lindito | Renda Mozicho | Extras (JSON)
+  // Aba "Orçamentos" com colunas: Mês | Renda Lindito | Renda Mozicho | Extras (JSON) | Metas (JSON)
   async ensureBudgetSheet(){
     const meta=await (await fetch(this.base,{headers:this.headers()})).json();
     const exists=meta.sheets?.some(s=>s.properties.title==='Orçamentos');
@@ -231,16 +298,16 @@ class SheetsDB {
         body:JSON.stringify({requests:[{addSheet:{properties:{title:'Orçamentos'}}}]})
       });
       // Header row
-      await fetch(`${this.base}/values/Orçamentos!A1:D1?valueInputOption=RAW`,{
+      await fetch(`${this.base}/values/Orçamentos!A1:E1?valueInputOption=RAW`,{
         method:'PUT',headers:this.headers(),
-        body:JSON.stringify({values:[['Mês','Renda Lindito','Renda Mozicho','Extras']]})
+        body:JSON.stringify({values:[['Mês','Renda Lindito','Renda Mozicho','Extras','Metas']]})
       });
     }
   }
 
   async getBudgets(){
     try{
-      const r=await fetch(`${this.base}/values/Orçamentos!A:D`,{headers:this.headers()});
+      const r=await fetch(`${this.base}/values/Orçamentos!A:E`,{headers:this.headers()});
       if(!r.ok)return{};
       const d=await r.json();
       const rows=(d.values||[]).slice(1); // skip header
@@ -250,10 +317,36 @@ class SheetsDB {
         const mk=row[0];
         let extras=[];
         try{extras=JSON.parse(row[3]||'[]');}catch{}
-        result[mk]={budgets:{Lindito:parseFloat(row[1])||0,Mozicho:parseFloat(row[2])||0},extras};
+        let metas={};
+        try{metas=JSON.parse(row[4]||'{}');}catch{}
+        result[mk]={budgets:{Lindito:parseFloat(row[1])||0,Mozicho:parseFloat(row[2])||0},extras,metas};
       }
       return result;
     }catch{return{};}
+  }
+
+  // Salva apenas as metas (estimativas por categoria) do mês na coluna E,
+  // sem mexer no orçamento (renda/extras) já gravado.
+  async saveMetas(monthKey,metas){
+    await this.ensureBudgetSheet();
+    const r=await fetch(`${this.base}/values/Orçamentos!A:A`,{headers:this.headers()});
+    const d=await r.json();
+    const rows=d.values||[];
+    const rowIdx=rows.findIndex(rr=>rr[0]===monthKey);
+    const json=JSON.stringify(metas||{});
+    if(rowIdx>=1){
+      const rowNum=rowIdx+1;
+      await fetch(`${this.base}/values/Orçamentos!E${rowNum}?valueInputOption=RAW`,{
+        method:'PUT',headers:this.headers(),
+        body:JSON.stringify({values:[[json]]})
+      });
+    }else{
+      // Cria a linha do mês com renda zerada e as metas
+      await fetch(`${this.base}/values/Orçamentos!A:E:append?valueInputOption=RAW&insertDataOption=INSERT_ROWS`,{
+        method:'POST',headers:this.headers(),
+        body:JSON.stringify({values:[[monthKey,0,0,'[]',json]]})
+      });
+    }
   }
 
   async saveBudget(monthKey,budgets,extras){
@@ -280,26 +373,107 @@ class SheetsDB {
       });
     }
   }
+
+  // ── Cofrinhos sheet helpers ───────────────────────────────────────────────────
+  // Aba "Cofrinhos": Data | Cofrinho | Tipo (Depósito/Retirada) | Valor | De quem | Descrição
+  async ensureCofrinhosSheet(){
+    const meta=await (await fetch(this.base,{headers:this.headers()})).json();
+    const exists=meta.sheets?.some(s=>s.properties.title==='Cofrinhos');
+    if(!exists){
+      await fetch(`${this.base}:batchUpdate`,{
+        method:'POST',headers:this.headers(),
+        body:JSON.stringify({requests:[{addSheet:{properties:{title:'Cofrinhos'}}}]})
+      });
+      await fetch(`${this.base}/values/Cofrinhos!A1:F1?valueInputOption=RAW`,{
+        method:'PUT',headers:this.headers(),
+        body:JSON.stringify({values:[['Data','Cofrinho','Tipo','Valor','De quem','Descrição']]})
+      });
+    }
+  }
+
+  async getCofrinhos(){
+    try{
+      const r=await fetch(`${this.base}/values/Cofrinhos!A:F?valueRenderOption=FORMATTED_VALUE`,{headers:this.headers()});
+      if(!r.ok)return[];
+      const d=await r.json();
+      const rows=(d.values||[]).slice(1);
+      return rows.filter(row=>row[1]&&row[3]).map((row,i)=>({
+        _row:i+2,
+        date:normalizeDate(row[0]),
+        cofrinho:row[1]||'',
+        tipo:row[2]||'Depósito',
+        valor:parseValor(row[3]),
+        deQuem:row[4]||'',
+        desc:row[5]||''
+      }));
+    }catch{return[];}
+  }
+
+  async appendCofrinho(tx){
+    await this.ensureCofrinhosSheet();
+    const row=[[fmtDate(tx.date),tx.cofrinho,tx.tipo||'Depósito',valorToSheet(tx.valor),tx.deQuem||'',tx.desc||'']];
+    const r=await fetch(`${this.base}/values/Cofrinhos!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,{
+      method:'POST',headers:this.headers(),
+      body:JSON.stringify({values:row})
+    });
+    if(!r.ok)throw new Error(await r.text());
+    return r.json();
+  }
 }
 
 // ── Auth ──────────────────────────────────────────────────────────────────────
 function useGoogleAuth(clientId){
-  // O token permanece somente na memória desta sessão. Assim, não é persistido no navegador.
-  const [token,setToken]=useState(null);
-  const [tokenExpiry,setTokenExpiry]=useState(0);
+  // O token de acesso é mantido em sessionStorage (sobrevive a reaberturas/minimização
+  // do app) e, quando expira, tentamos renovar em silêncio sem pedir login de novo.
+  const TOK_KEY='g_tok_v1';
+  const readStored=()=>{
+    try{
+      const s=JSON.parse(sessionStorage.getItem(TOK_KEY)||localStorage.getItem(TOK_KEY)||'null');
+      if(s&&s.token&&s.expiry&&s.expiry>Date.now())return s;
+    }catch{}
+    return null;
+  };
+  const stored=readStored();
+  const [token,setToken]=useState(stored?stored.token:null);
+  const [tokenExpiry,setTokenExpiry]=useState(stored?stored.expiry:0);
   const [loading,setLoading]=useState(false);
   const [tokenExpired,setTokenExpired]=useState(false);
   const clientRef=useRef(null);
+  const silentTriedRef=useRef(false);
+
+  // Guarda/limpa o token persistido
+  function persist(tok,expiry){
+    try{
+      const payload=JSON.stringify({token:tok,expiry});
+      sessionStorage.setItem(TOK_KEY,payload);
+      localStorage.setItem(TOK_KEY,payload); // sobrevive ao fechamento do PWA
+    }catch{}
+  }
+  function clearPersist(){
+    try{sessionStorage.removeItem(TOK_KEY);localStorage.removeItem(TOK_KEY);}catch{}
+  }
+
+  // Tenta obter um token sem interação do usuário (consentimento já concedido antes)
+  function trySilent(){
+    if(!clientRef.current)return;
+    silentTriedRef.current=true;
+    try{clientRef.current.requestAccessToken({prompt:''});}catch{}
+  }
 
   useEffect(()=>{
     function check(){
       if(!tokenExpiry)return;
       const msLeft=tokenExpiry-Date.now();
       if(msLeft<=0){
-        setTokenExpired(true);
         setToken(null);
+        clearPersist();
+        // Token venceu: tenta renovar em silêncio antes de marcar como expirado
+        trySilent();
+        setTokenExpired(true);
       } else {
         setTokenExpired(msLeft<5*60*1000);
+        // Renova proativamente quando faltar menos de 5 min
+        if(msLeft<5*60*1000)trySilent();
       }
     }
     check();
@@ -318,6 +492,7 @@ function useGoogleAuth(clientId){
           setToken(resp.access_token);
           setTokenExpiry(expiry);
           setTokenExpired(false);
+          persist(resp.access_token,expiry);
         }else{
           setToken(null);
           setTokenExpiry(0);
@@ -327,12 +502,35 @@ function useGoogleAuth(clientId){
       },
       error_callback:()=>{
         setLoading(false);
-        setToken(null);
-        setTokenExpiry(0);
+        // Falha no silencioso não deve travar; apenas marca como expirado para mostrar reconectar
         setTokenExpired(true);
       }
     });
+    // Se não há token válido em memória ao iniciar, tenta reconectar em silêncio
+    if(!readStored()&&!silentTriedRef.current){
+      trySilent();
+    }
   },[clientId]);
+
+  // Ao voltar o foco / reabrir o app, se o token venceu, tenta renovar em silêncio
+  useEffect(()=>{
+    function onVis(){
+      if(document.visibilityState==='visible'){
+        const s=readStored();
+        if(s){
+          setToken(s.token);setTokenExpiry(s.expiry);setTokenExpired(false);
+        }else if(tokenExpiry&&tokenExpiry<=Date.now()){
+          trySilent();
+        }
+      }
+    }
+    document.addEventListener('visibilitychange',onVis);
+    window.addEventListener('focus',onVis);
+    return()=>{
+      document.removeEventListener('visibilitychange',onVis);
+      window.removeEventListener('focus',onVis);
+    };
+  },[tokenExpiry]);
 
   function signIn(prompt='select_account'){
     if(!clientRef.current)return;
@@ -347,6 +545,7 @@ function useGoogleAuth(clientId){
     setToken(null);
     setTokenExpiry(0);
     setTokenExpired(false);
+    clearPersist();
   }
 
   return{token,loading,signIn,signOut,tokenExpired};
@@ -368,6 +567,13 @@ function parseValor(v){
   }
   // Normal float: 1234.56
   return parseFloat(clean)||0;
+}
+// Formata número para gravar na planilha no padrão brasileiro: vírgula como
+// separador decimal e SEM separador de milhar (ex: 1234.56 -> "1234,56").
+// O ponto é apenas para leitura na tela; na planilha grava-se só com vírgula.
+function valorToSheet(v){
+  const n=Number(v)||0;
+  return n.toFixed(2).replace('.',',');
 }
 function normalizeDate(d){
   if(d===null||d===undefined||d==='')return'';
@@ -833,11 +1039,11 @@ function SetupScreen({onDone}){
           </div>
         </div>
         <div style={{background:'var(--conj-bg)',border:'1.5px solid var(--conj-border)',borderRadius:12,padding:12,marginBottom:20,fontSize:12,color:'var(--text2)'}}>
-          <strong style={{color:'var(--conj)'}}>📋 Estrutura da planilha:</strong> A aba precisa se chamar <strong>"Base de dados"</strong> com colunas: Data | Descrição | Valor | Categoria | De quem? | Quem pagou?<br/>
-          <span style={{marginTop:4,display:'block'}}>A aba <strong>"Orçamentos"</strong> será criada automaticamente para salvar os orçamentos mensais.</span>
+          <strong style={{color:'var(--conj)'}}>📋 Estrutura da planilha:</strong> A aba precisa se chamar <strong>"Base de dados"</strong> com colunas: Data | Descrição | Valor | Categoria | De quem? | Quem pagou? | Forma de pagamento | Instituição<br/>
+          <span style={{marginTop:4,display:'block'}}>As abas <strong>"Orçamentos"</strong> (orçamentos e estimativas) e <strong>"Cofrinhos"</strong> (dinheiro guardado) são criadas automaticamente.</span>
         </div>
         <div style={{background:'var(--bg3)',border:'1.5px solid var(--border2)',borderRadius:12,padding:12,marginBottom:20,fontSize:12,color:'var(--text2)'}}>
-          <strong style={{color:'var(--amber)'}}>🔒 Segurança:</strong> O Client ID OAuth e o ID da planilha ficam salvos localmente no seu dispositivo (localStorage). <strong style={{color:'var(--text)'}}>Nenhum dado financeiro é armazenado no app</strong> — tudo fica na sua planilha Google Sheets protegida pela sua conta Google. O token de acesso existe apenas enquanto o app está aberto e nunca é gravado no disco.
+          <strong style={{color:'var(--amber)'}}>🔒 Segurança:</strong> O Client ID OAuth e o ID da planilha ficam salvos localmente no seu dispositivo (localStorage). <strong style={{color:'var(--text)'}}>Nenhum dado financeiro é armazenado no app</strong> — tudo fica na sua planilha Google Sheets protegida pela sua conta Google. Para manter você conectado entre reaberturas, o token de acesso é guardado localmente no seu dispositivo e renovado automaticamente; ele é apagado ao sair (logout).
         </div>
         <button onClick={save} disabled={!clientId||!sheetId}
           style={{width:'100%',padding:'15px',background:'var(--accent)',color:'#fff',borderRadius:14,fontSize:15,fontWeight:700,opacity:clientId&&sheetId?1:0.4}}>
@@ -972,8 +1178,10 @@ function QuitacaoModal({onClose,onSave,debt,data,preSelMonth}){
 // ── Edit/Delete Modal ─────────────────────────────────────────────────────────
 function EditModal({entry,onClose,onSave,onDelete}){
   useBackButton(onClose,'edit');
-  const [form,setForm]=useState({...entry});
+  const [form,setForm]=useState({...entry,valor:entry.valor!=null?String(entry.valor):''});
+  const [payVersion,setPayVersion]=useState(0);
   const set=(k,v)=>setForm(f=>({...f,[k]:v}));
+  const isGasto=!NON_GASTO.has(form.categoria);
 
   return(
     <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&onClose()}>
@@ -983,7 +1191,7 @@ function EditModal({entry,onClose,onSave,onDelete}){
         <div className="modal-title">Editar lançamento</div>
         <div className="val-wrap">
           <div className="val-label">Valor</div>
-          <input className="val-input" type="number" inputMode="decimal" value={form.valor} onChange={e=>set('valor',parseFloat(e.target.value)||0)}/>
+          <CurrencyInput value={form.valor} onChange={v=>set('valor',v)}/>
         </div>
         <div className="field" style={{paddingTop:16}}>
           <div className="fl">Descrição</div>
@@ -1011,11 +1219,33 @@ function EditModal({entry,onClose,onSave,onDelete}){
             ))}
           </div>
         </div>
+        {isGasto&&(
+          <div className="field">
+            <div className="fl">Forma de pagamento</div>
+            <div className="chip-row">
+              {getFormas().map(f=>(
+                <button key={f} onClick={()=>set('forma',form.forma===f?'':f)} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:600,background:form.forma===f?'var(--accent)':'var(--bg3)',color:form.forma===f?'#fff':'var(--text2)',border:`1.5px solid ${form.forma===f?'var(--accent)':'var(--border)'}`}}>{f}</button>
+              ))}
+              <button onClick={()=>{const nv=window.prompt('Nova forma de pagamento:');if(nv&&nv.trim()){addForma(nv);set('forma',nv.trim());setPayVersion(v=>v+1);}}} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:700,background:'var(--bg3)',color:'var(--accent)',border:'1.5px dashed var(--border2)'}}>+ Nova</button>
+            </div>
+          </div>
+        )}
+        {isGasto&&(
+          <div className="field">
+            <div className="fl">Instituição</div>
+            <div className="chip-row">
+              {getInstituicoes().map(b=>(
+                <button key={b} onClick={()=>set('instituicao',form.instituicao===b?'':b)} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:600,background:form.instituicao===b?'var(--accent)':'var(--bg3)',color:form.instituicao===b?'#fff':'var(--text2)',border:`1.5px solid ${form.instituicao===b?'var(--accent)':'var(--border)'}`}}>{b}</button>
+              ))}
+              <button onClick={()=>{const nv=window.prompt('Nova instituição:');if(nv&&nv.trim()){addInstituicao(nv);set('instituicao',nv.trim());setPayVersion(v=>v+1);}}} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:700,background:'var(--bg3)',color:'var(--accent)',border:'1.5px dashed var(--border2)'}}>+ Nova</button>
+            </div>
+          </div>
+        )}
         <div className="field">
           <div className="fl">Data</div>
           <input className="fi" type="date" value={form.date} onChange={e=>set('date',e.target.value)}/>
         </div>
-        <button className="btn" onClick={()=>onSave(form)}>Salvar alterações</button>
+        <button className="btn" onClick={()=>onSave({...form,valor:parseFloat(String(form.valor).replace(',','.'))||0})}>Salvar alterações</button>
         <button className="btn btn-red" onClick={()=>onDelete(entry)} style={{marginTop:8,background:'transparent',color:'var(--red)',border:'1.5px solid var(--red)',borderRadius:14,padding:'13px',fontSize:15,fontWeight:700,display:'block',width:'calc(100% - 40px)',margin:'8px 20px 0',textAlign:'center'}}>
           Excluir lançamento
         </button>
@@ -1025,8 +1255,8 @@ function EditModal({entry,onClose,onSave,onDelete}){
 }
 
 // ── Add Modal ─────────────────────────────────────────────────────────────────
-function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initialMode}){
-  // mode: 'gasto' | 'receita' | 'quitacao'
+function AddModal({onClose,onSave,onSaveCofrinho,defaultPessoa,debt,data,onCatStoreChange,initialMode}){
+  // mode: 'gasto' | 'receita' | 'quitacao' | 'cofrinho'
   const [mode,setMode]=useState(initialMode||'gasto');
   const [valor,setValor]=useState('');
   const [desc,setDesc]=useState('');
@@ -1034,6 +1264,13 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
   const [deQuem,setDeQuem]=useState(defaultPessoa==='Conjunto'?'Conjunto':defaultPessoa||'Conjunto');
   const [pago,setPago]=useState(defaultPessoa==='Mozicho'?'Mozicho':'Lindito');
   const [date,setDate]=useState(today());
+  // Forma de pagamento + instituição (apenas gasto)
+  const [forma,setForma]=useState('');
+  const [instituicao,setInstituicao]=useState('');
+  const [payVersion,setPayVersion]=useState(0); // re-render ao adicionar forma/instituição
+  // Cofrinho (depósito)
+  const [cofrinho,setCofrinho]=useState(getCofrinhoNames()[0]||'');
+  const [cofreVersion,setCofreVersion]=useState(0);
   // Receita recorrente
   const [recorrente,setRecorrente]=useState(false);
   const [meses,setMeses]=useState('12');
@@ -1074,6 +1311,14 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
     // Aceita expressão da calculadora ou número direto
     const v=evalCalcExpr(valor);
     if(!v||v<=0)return;
+    if(mode==='cofrinho'){
+      const nome=(cofrinho||'').trim();
+      if(!nome){return;}
+      addCofrinhoName(nome);
+      onSaveCofrinho&&onSaveCofrinho({date,cofrinho:nome,tipo:'Depósito',valor:v,deQuem,desc:desc||`Depósito em ${nome}`});
+      onClose();
+      return;
+    }
     if(mode==='quitacao'){
       const devedor=quitDebt.net>0?'Mozicho':'Lindito';
       const credor=quitDebt.net>0?'Lindito':'Mozicho';
@@ -1099,6 +1344,7 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
       }
     } else {
       if(!desc)return;
+      const pay={forma,instituicao};
       // Gastos recorrentes
       if(recorrenteGasto){
         const [py,pm]=date.slice(0,7).split('-').map(Number);
@@ -1117,7 +1363,7 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
           const lastDay=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();
           const useDia=Math.min(dia,lastDay);
           const dateStr=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(useDia).padStart(2,'0')}`;
-          entries.push({date:dateStr,desc:`${desc} (${i+1}/${n})`,valor:v,categoria:cat,deQuem,quemPagou:pago,_recurrentId:recorrenteId,_recurrentNum:i+1,_recurrentTotal:n});
+          entries.push({date:dateStr,desc:`${desc} (${i+1}/${n})`,valor:v,categoria:cat,deQuem,quemPagou:pago,...pay,_recurrentId:recorrenteId,_recurrentNum:i+1,_recurrentTotal:n});
         }
         onSave(entries);
       } else if(parcelado){
@@ -1131,11 +1377,11 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
           const lastDay=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();
           const useDia=Math.min(dia,lastDay);
           const dateStr=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(useDia).padStart(2,'0')}`;
-          entries.push({date:dateStr,desc:`${desc} (${i+1}/${n})`,valor:valorParcela,categoria:cat,deQuem,quemPagou:pago});
+          entries.push({date:dateStr,desc:`${desc} (${i+1}/${n})`,valor:valorParcela,categoria:cat,deQuem,quemPagou:pago,...pay});
         }
         onSave(entries);
       } else {
-        onSave({date,desc,valor:v,categoria:cat,deQuem,quemPagou:pago});
+        onSave({date,desc,valor:v,categoria:cat,deQuem,quemPagou:pago,...pay});
       }
     }
     onClose();
@@ -1153,17 +1399,18 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
     onCatStoreChange&&onCatStoreChange();
   }
 
-  const btnColors={gasto:'var(--accent)',receita:'var(--conj)',quitacao:'var(--green)'};
+  const btnColors={gasto:'var(--accent)',receita:'var(--conj)',quitacao:'var(--green)',cofrinho:'var(--amber)'};
 
   return(
     <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&onClose()}>
       <div className="modal">
         <button className="modal-x" onClick={onClose} aria-label="Fechar">×</button>
         <div className="modal-handle"></div>
-        <div style={{padding:'0 20px 16px',display:'flex',gap:8}}>
-          <button onClick={()=>setMode('gasto')} style={{flex:1,padding:'10px',borderRadius:12,background:mode==='gasto'?'var(--accent)':'var(--bg3)',color:mode==='gasto'?'#fff':'var(--text2)',border:'none',fontSize:13,fontWeight:700}}>💸 Gasto</button>
-          <button onClick={()=>setMode('receita')} style={{flex:1,padding:'10px',borderRadius:12,background:mode==='receita'?'var(--conj)':'var(--bg3)',color:mode==='receita'?'#fff':'var(--text2)',border:'none',fontSize:13,fontWeight:700}}>💰 Receita</button>
-          <button onClick={()=>setMode('quitacao')} style={{flex:1,padding:'10px',borderRadius:12,background:mode==='quitacao'?'var(--green)':'var(--bg3)',color:mode==='quitacao'?'#fff':'var(--text2)',border:'none',fontSize:13,fontWeight:700}}>🤝 Quitação</button>
+        <div style={{padding:'0 20px 16px',display:'grid',gridTemplateColumns:'1fr 1fr 1fr 1fr',gap:6}}>
+          <button onClick={()=>setMode('gasto')} style={{padding:'9px 4px',borderRadius:12,background:mode==='gasto'?'var(--accent)':'var(--bg3)',color:mode==='gasto'?'#fff':'var(--text2)',border:'none',fontSize:12,fontWeight:700}}>💸 Gasto</button>
+          <button onClick={()=>setMode('receita')} style={{padding:'9px 4px',borderRadius:12,background:mode==='receita'?'var(--conj)':'var(--bg3)',color:mode==='receita'?'#fff':'var(--text2)',border:'none',fontSize:12,fontWeight:700}}>💰 Receita</button>
+          <button onClick={()=>setMode('cofrinho')} style={{padding:'9px 4px',borderRadius:12,background:mode==='cofrinho'?'var(--amber)':'var(--bg3)',color:mode==='cofrinho'?'#fff':'var(--text2)',border:'none',fontSize:12,fontWeight:700}}>🐷 Cofrinho</button>
+          <button onClick={()=>setMode('quitacao')} style={{padding:'9px 4px',borderRadius:12,background:mode==='quitacao'?'var(--green)':'var(--bg3)',color:mode==='quitacao'?'#fff':'var(--text2)',border:'none',fontSize:12,fontWeight:700}}>🤝 Quitar</button>
         </div>
 
         {/* Quitação: month selector */}
@@ -1210,14 +1457,34 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
               </div>
             </>
           ):(
-            <input ref={ref} className="val-input" type="number" inputMode="decimal" placeholder="0,00" value={valor} onChange={e=>setValor(e.target.value)}/>
+            <CurrencyInput inputRef={ref} value={valor} onChange={setValor}/>
           )}
         </div>
 
         {mode!=='quitacao'&&(
           <div className="field" style={{paddingTop:16}}>
-            <div className="fl">Descrição</div>
-            <input className="fi" type="text" placeholder={mode==='receita'?'Ex: Salário, freelance...':'Ex: Almoço iFood'} value={desc} onChange={e=>setDesc(e.target.value)}/>
+            <div className="fl">{mode==='cofrinho'?'Descrição (opcional)':'Descrição'}</div>
+            <input className="fi" type="text" placeholder={mode==='receita'?'Ex: Salário, freelance...':mode==='cofrinho'?'Ex: aporte mensal':'Ex: Almoço iFood'} value={desc} onChange={e=>setDesc(e.target.value)}/>
+          </div>
+        )}
+
+        {mode==='cofrinho'&&(
+          <div className="field">
+            <div className="fl">Cofrinho de destino</div>
+            <select className="fi" value={cofrinho} onChange={e=>{
+              if(e.target.value==='__add__'){
+                const nome=window.prompt('Nome do novo cofrinho (ex: Viagem Japão, Carro novo):');
+                if(nome&&nome.trim()){addCofrinhoName(nome);setCofrinho(nome.trim());setCofreVersion(v=>v+1);}
+                return;
+              }
+              setCofrinho(e.target.value);
+            }}>
+              {getCofrinhoNames().map(c=><option key={c} value={c}>🐷 {c}</option>)}
+              <option value="__add__" style={{fontWeight:'bold',color:'var(--amber)'}}>+ Novo cofrinho…</option>
+            </select>
+            <div style={{marginTop:8,padding:'10px 12px',background:'var(--bg3)',borderRadius:10,fontSize:12,color:'var(--text2)',lineHeight:1.5}}>
+              💡 Esse valor sai do seu “disponível para gastar” do mês e é guardado no cofrinho. Você pode retirar depois na aba <strong style={{color:'var(--amber)'}}>Cofrinhos</strong>.
+            </div>
           </div>
         )}
 
@@ -1254,6 +1521,44 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
               {['Lindito','Mozicho'].map(p=>(
                 <button key={p} className={`chip ${PERSON_CLS[p]} ${pago===p?'active':''}`} onClick={()=>setPago(p)}>{p}</button>
               ))}
+            </div>
+          </div>
+        )}
+
+        {mode==='gasto'&&(
+          <div className="field">
+            <div className="fl">Forma de pagamento</div>
+            <div className="chip-row">
+              {getFormas().map(f=>(
+                <button key={f} onClick={()=>setForma(forma===f?'':f)} style={{
+                  padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:600,
+                  background:forma===f?'var(--accent)':'var(--bg3)',color:forma===f?'#fff':'var(--text2)',
+                  border:`1.5px solid ${forma===f?'var(--accent)':'var(--border)'}`
+                }}>{f}</button>
+              ))}
+              <button onClick={()=>{
+                const nv=window.prompt('Nova forma de pagamento (ex: Boleto, Dinheiro):');
+                if(nv&&nv.trim()){addForma(nv);setForma(nv.trim());setPayVersion(v=>v+1);}
+              }} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:700,background:'var(--bg3)',color:'var(--accent)',border:'1.5px dashed var(--border2)'}}>+ Nova</button>
+            </div>
+          </div>
+        )}
+
+        {mode==='gasto'&&(
+          <div className="field">
+            <div className="fl">Instituição</div>
+            <div className="chip-row">
+              {getInstituicoes().map(b=>(
+                <button key={b} onClick={()=>setInstituicao(instituicao===b?'':b)} style={{
+                  padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:600,
+                  background:instituicao===b?'var(--accent)':'var(--bg3)',color:instituicao===b?'#fff':'var(--text2)',
+                  border:`1.5px solid ${instituicao===b?'var(--accent)':'var(--border)'}`
+                }}>{b}</button>
+              ))}
+              <button onClick={()=>{
+                const nv=window.prompt('Nova instituição (ex: Inter, C6, Banco do Brasil):');
+                if(nv&&nv.trim()){addInstituicao(nv);setInstituicao(nv.trim());setPayVersion(v=>v+1);}
+              }} style={{padding:'8px 14px',borderRadius:18,fontSize:13,fontWeight:700,background:'var(--bg3)',color:'var(--accent)',border:'1.5px dashed var(--border2)'}}>+ Nova</button>
             </div>
           </div>
         )}
@@ -1390,9 +1695,9 @@ function AddModal({onClose,onSave,defaultPessoa,debt,data,onCatStoreChange,initi
         </div>
 
         <button className="btn" onClick={save}
-          disabled={!valor||((mode!=='quitacao'&&!desc))}
+          disabled={!valor||((mode!=='quitacao'&&mode!=='cofrinho'&&!desc))}
           style={{background:btnColors[mode]}}>
-          {mode==='gasto'?(parcelado?`Salvar ${Math.max(1,parseInt(nParc)||1)} parcelas`:'Salvar gasto'):mode==='receita'?(recorrente?`💰 Salvar ${Math.max(1,parseInt(meses)||1)} receitas`:'💰 Salvar receita'):'✅ Registrar quitação'}
+          {mode==='gasto'?(parcelado?`Salvar ${Math.max(1,parseInt(nParc)||1)} parcelas`:'Salvar gasto'):mode==='receita'?(recorrente?`💰 Salvar ${Math.max(1,parseInt(meses)||1)} receitas`:'💰 Salvar receita'):mode==='cofrinho'?'🐷 Guardar no cofrinho':'✅ Registrar quitação'}
         </button>
       </div>
       {showAddCat&&<NovaCategoriaModal onClose={()=>setShowAddCat(false)} onSave={addNovaCategoria}/>}
@@ -1535,31 +1840,44 @@ function MultiCatTrend({data,pessoa,allMs}){
         ))}
       </div>
 
-      {/* Filtro de categorias (multi-seleção) */}
-      <div className="chip-row" style={{marginBottom:12}}>
+      {/* Filtro de categorias: escolha pela lista suspensa; só as escolhidas viram linha */}
+      <div style={{marginBottom:12}}>
+        <div style={{position:'relative',marginBottom:sel.length>0?10:0}}>
+          <select value="" onChange={e=>{if(e.target.value){toggle(e.target.value);}}} style={{
+            width:'100%',padding:'10px 32px 10px 12px',background:'var(--bg2)',
+            border:'1.5px solid var(--border)',borderRadius:12,fontSize:13,fontWeight:700,
+            color:'var(--text)',outline:'none',appearance:'none',cursor:'pointer'
+          }}>
+            <option value="">＋ Adicionar categoria ao gráfico…</option>
+            {availCats.filter(c=>!sel.includes(c)).map(c=>(
+              <option key={c} value={c}>{getCatEmoji(c)} {c}</option>
+            ))}
+          </select>
+          <span style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',pointerEvents:'none',fontSize:10,color:'var(--text2)'}}>▼</span>
+        </div>
         {availCats.length===0&&(
-          <span style={{fontSize:12,color:'var(--text3)'}}>Sem gastos para exibir.</span>
+          <div style={{fontSize:12,color:'var(--text3)'}}>Sem gastos para exibir.</div>
         )}
-        {availCats.map(cat=>{
-          const on=sel.includes(cat);
-          return(
+        {/* Tags das categorias selecionadas (clique no × para remover) */}
+        <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+          {sel.filter(c=>availCats.includes(c)).map(cat=>(
             <button key={cat} onClick={()=>toggle(cat)} style={{
-              padding:'6px 12px',borderRadius:18,fontSize:12,fontWeight:700,
-              display:'inline-flex',alignItems:'center',gap:5,
-              background:on?getCatColor(cat):'var(--bg3)',
-              color:on?'#fff':'var(--text2)',
-              border:`1.5px solid ${on?getCatColor(cat):'var(--border)'}`,
-              transition:'all 0.15s'
+              padding:'6px 10px',borderRadius:18,fontSize:12,fontWeight:700,
+              display:'inline-flex',alignItems:'center',gap:6,
+              background:getCatColor(cat),color:'#fff',border:'none'
             }}>
-              {getCatEmoji(cat)} {cat}
+              {getCatEmoji(cat)} {cat} <span style={{opacity:0.85,fontWeight:800}}>×</span>
             </button>
-          );
-        })}
+          ))}
+          {sel.filter(c=>availCats.includes(c)).length>0&&(
+            <button onClick={()=>{touched.current=true;setSel([]);}} style={{padding:'6px 10px',borderRadius:18,fontSize:12,fontWeight:700,background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border)'}}>Limpar</button>
+          )}
+        </div>
       </div>
 
       {series.length===0?(
         <div style={{textAlign:'center',color:'var(--text3)',padding:'28px 0',fontSize:13}}>
-          Selecione uma ou mais categorias acima para ver o gráfico
+          Escolha uma ou mais categorias na lista acima para ver o gráfico
         </div>
       ):(
         <>
@@ -1623,25 +1941,37 @@ function MultiCatTrend({data,pessoa,allMs}){
 }
 
 // ── Home Screen ───────────────────────────────────────────────────────────────
-function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBudgetToSheets,onRefresh,onAddReceita}){
+function Home({data,pessoa,setPessoa,budgetData,setBudgetData,cofrinhoData=[],syncStatus,syncBudgetToSheets,saveMetasToSheets,onRefresh,onAddReceita}){
   const [selM,setSelM]=useState(today().slice(0,7));
   const [showBudget,setShowBudget]=useState(false);
+  const [showMetas,setShowMetas]=useState(false);
   const [catFilter,setCatFilter]=useState(null); // categoria selecionada no donut
   const [trendCat,setTrendCat]=useState('all'); // categoria do gráfico de histórico
   const [trendRange,setTrendRange]=useState(12); // período do gráfico: 6, 12 ou 'all'
   const [showProjection,setShowProjection]=useState(true); // mostrar linha de projeção/tendência
   const allMs=[...new Set(data.map(r=>toMk(r.date)))].filter(m=>m&&/^\d{4}-\d{2}$/.test(m)&&m>='2025-01').sort().reverse();
   const rows=data.filter(r=>toMk(r.date)===selM);
-  const monthBudget=budgetData[selM]||{budgets:{Lindito:0,Mozicho:0},extras:[]};
+  const monthBudget=budgetData[selM]||{budgets:{Lindito:0,Mozicho:0},extras:[],metas:{}};
   const baseBudget=pessoa==='Conjunto'?(monthBudget.budgets.Lindito+monthBudget.budgets.Mozicho):(monthBudget.budgets[pessoa]||0);
   const extrasTotal=monthBudget.extras.filter(e=>pessoa==='Conjunto'||e.pessoa===pessoa||e.pessoa==='Conjunto').reduce((s,e)=>s+e.valor,0);
   // Receitas lançadas no mês via botão + → entram automaticamente no orçamento
   const receitasAuto=totalReceita(rows,pessoa);
   const totalIncome=baseBudget+extrasTotal+receitasAuto;
   const gasto=totalPessoa(rows,pessoa);
-  // Se não tem orçamento definido E não tem receita, não calcula percentual
-  const restante=totalIncome>0?totalIncome-gasto:0;
-  const over=totalIncome>0&&gasto>totalIncome;
+  // Cofrinhos do mês: depósitos reduzem o disponível, retiradas devolvem ao disponível
+  const cofMesDep=cofrinhoData.filter(c=>toMk(c.date)===selM&&c.tipo!=='Retirada').reduce((s,c)=>s+c.valor,0);
+  const cofMesRet=cofrinhoData.filter(c=>toMk(c.date)===selM&&c.tipo==='Retirada').reduce((s,c)=>s+c.valor,0);
+  // Disponível considera também o que foi guardado/retirado dos cofrinhos no mês
+  const restante=totalIncome>0?totalIncome-gasto-cofMesDep+cofMesRet:0;
+  const over=totalIncome>0&&(gasto+cofMesDep-cofMesRet)>totalIncome;
+  // Estimativas (metas) do mês — totais do mês (household)
+  const metas=monthBudget.metas||{};
+  const monthRowsAll=data.filter(r=>toMk(r.date)===selM&&!NON_GASTO.has(r.categoria));
+  const realByCatAll={};
+  for(const r of monthRowsAll){realByCatAll[r.categoria]=(realByCatAll[r.categoria]||0)+r.valor;}
+  const gastoTotalMes=monthRowsAll.reduce((s,r)=>s+r.valor,0);
+  const estimadoTotal=Object.values(metas).reduce((s,v)=>s+(Number(v)||0),0);
+  const metaCats=Object.keys(metas).filter(c=>Number(metas[c])>0).sort((a,b)=>(Number(metas[b])||0)-(Number(metas[a])||0));
   const pColor=PERSON_COLOR[pessoa]||'var(--accent)';
   const debt=calcDebt(data.filter(r=>toMk(r.date)===selM));
   const catRows=pessoa==='Lindito'?rows.filter(r=>r.deQuem==='Lindito'||r.deQuem==='Conjunto')
@@ -1748,6 +2078,12 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
               <div>
                 <div style={{fontSize:10,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'0.07em',marginBottom:2}}>Disponível</div>
                 <div style={{fontSize:17,fontWeight:700,color:restante>=0?'var(--green)':'var(--red)'}}>{fmt(restante)}</div>
+                {(cofMesDep>0||cofMesRet>0)&&(
+                  <div style={{marginTop:3,fontSize:9.5,color:'var(--text3)',lineHeight:1.6}}>
+                    {cofMesDep>0&&<div>🐷 Guardado em cofrinhos: −{fmt(cofMesDep)}</div>}
+                    {cofMesRet>0&&<div>🐷 Retirado de cofrinhos: +{fmt(cofMesRet)}</div>}
+                  </div>
+                )}
               </div>
               <div>
                 <div style={{fontSize:10,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'0.07em',marginBottom:2}}>Renda</div>
@@ -1780,6 +2116,71 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
         <button onClick={()=>setShowBudget(true)} style={{padding:'13px 12px',borderRadius:14,background:'var(--accent-bg)',border:'1.5px solid var(--accent)',color:'var(--accent)',fontSize:13,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center',gap:6}}>
           🎯 Definir orçamento
         </button>
+      </div>
+
+      {/* Estimativa vs Real (metas de gasto por categoria no mês) */}
+      <div className="card" style={{marginBottom:12}}>
+        <ST action={
+          <button onClick={()=>setShowMetas(true)} style={{padding:'5px 12px',borderRadius:18,background:'var(--accent-bg)',border:'1.5px solid var(--accent)',color:'var(--accent)',fontSize:11,fontWeight:700}}>
+            {metaCats.length>0?'✏️ Editar':'＋ Definir'}
+          </button>
+        }>🎯 Estimativa vs real · {mlabel(selM)}</ST>
+        {metaCats.length===0?(
+          <div style={{textAlign:'center',padding:'14px 8px',color:'var(--text2)'}}>
+            <div style={{fontSize:28,marginBottom:6}}>🎯</div>
+            <div style={{fontSize:13,lineHeight:1.5}}>Defina quanto pretende gastar em cada categoria (aluguel, mercado, lazer, medicamentos…) e acompanhe o quanto ainda resta.</div>
+            <button onClick={()=>setShowMetas(true)} style={{marginTop:12,padding:'10px 18px',borderRadius:12,background:'var(--accent)',color:'#fff',fontSize:13,fontWeight:700,border:'none'}}>Definir estimativas</button>
+          </div>
+        ):(
+          <>
+            {/* Total estimado vs real (mês inteiro, household) */}
+            {(()=>{
+              const restanteTotal=estimadoTotal-gastoTotalMes;
+              const overT=gastoTotalMes>estimadoTotal;
+              return(
+                <div style={{marginBottom:14,padding:'12px 14px',background:'var(--bg2)',borderRadius:12,border:'1px solid var(--border)'}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:6}}>
+                    <span style={{fontSize:12,fontWeight:700,color:'var(--text2)'}}>Total do mês</span>
+                    <span style={{fontSize:13,fontWeight:700,color:'var(--text)'}}>{fmt(gastoTotalMes)} <span style={{color:'var(--text3)',fontWeight:600}}>/ {fmt(estimadoTotal)}</span></span>
+                  </div>
+                  <HBar value={gastoTotalMes} max={estimadoTotal} color={overT?'var(--red)':'var(--accent)'} h={9}/>
+                  <div style={{fontSize:11,marginTop:6,fontWeight:700,color:overT?'var(--red)':'var(--green)'}}>
+                    {overT?`Acima do estimado em ${fmt(gastoTotalMes-estimadoTotal)}`:`Ainda dá para gastar ${fmt(restanteTotal)}`}
+                  </div>
+                </div>
+              );
+            })()}
+            {/* Por categoria */}
+            <div style={{display:'flex',flexDirection:'column',gap:12}}>
+              {metaCats.map(c=>{
+                const est=Number(metas[c])||0;
+                const real=realByCatAll[c]||0;
+                const disp=est-real;
+                const over=real>est;
+                return(
+                  <div key={c}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                      <span style={{fontSize:13,fontWeight:700,display:'inline-flex',alignItems:'center',gap:6,minWidth:0}}>
+                        <span>{getCatEmoji(c)}</span>
+                        <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c}</span>
+                      </span>
+                      <span style={{fontSize:12,fontWeight:700,color:over?'var(--red)':'var(--text2)',flexShrink:0,marginLeft:8}}>
+                        {fmt(real)} <span style={{color:'var(--text3)',fontWeight:600}}>/ {fmt(est)}</span>
+                      </span>
+                    </div>
+                    <HBar value={real} max={est} color={over?'var(--red)':getCatColor(c)} h={7}/>
+                    <div style={{fontSize:10.5,marginTop:3,color:over?'var(--red)':'var(--text2)',fontWeight:600}}>
+                      {over?`Estourou em ${fmt(real-est)}`:`Disponível: ${fmt(disp)}`}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{marginTop:12,fontSize:10.5,color:'var(--text3)',lineHeight:1.5}}>
+              Os valores consideram o total do mês (os dois juntos), independente do filtro de pessoa.
+            </div>
+          </>
+        )}
       </div>
 
       {/* Saldo mês */}
@@ -2178,6 +2579,7 @@ function Home({data,pessoa,setPessoa,budgetData,setBudgetData,syncStatus,syncBud
       </div>
       <div style={{height:8}}></div>
       {showBudget&&<OrcamentoModal onClose={()=>setShowBudget(false)} budgets={monthBudget.budgets} extras={monthBudget.extras} onSave={saveBudget} monthKey={selM} hasSheetsSync={typeof syncBudgetToSheets==='function'}/>}
+      {showMetas&&<MetasModal onClose={()=>setShowMetas(false)} monthKey={selM} metas={metas} sugeridas={(budgetData[addMonths(selM,-1)]||{}).metas||{}} onSave={(m)=>{if(typeof saveMetasToSheets==='function')saveMetasToSheets(selM,m);}}/>}
     </div>
   );
 }
@@ -2564,6 +2966,7 @@ function Historico({data,pessoa:defaultPessoa,onEdit,onRefresh,syncStatus}){
             <div style={{fontSize:10,color:'var(--text2)',marginTop:2}}>
               {fmtDate(r.date)} · <span style={{color:PERSON_COLOR[r.deQuem]||'var(--text2)',fontWeight:700}}>{r.deQuem}</span>
               {r.categoria==='Quitação'&&<span style={{marginLeft:4,background:'var(--conj-bg)',color:'var(--conj)',padding:'1px 5px',borderRadius:4,fontSize:10,fontWeight:700}}>quitação</span>}
+              {(r.forma||r.instituicao)&&<span style={{marginLeft:4,background:'var(--bg3)',color:'var(--text2)',padding:'1px 5px',borderRadius:4,fontSize:9.5,fontWeight:600}}>💳 {[r.forma,r.instituicao].filter(Boolean).join(' · ')}</span>}
             </div>
           </div>
           <div style={{textAlign:'right',flexShrink:0}}>
@@ -2671,6 +3074,215 @@ function CategoriasModal({onClose,onChange,data}){
   );
 }
 
+// ── Modal de Estimativas (metas de gasto por categoria no mês) ─────────────────
+function MetasModal({onClose,monthKey,metas,onSave,sugeridas}){
+  useBackButton(onClose,'metas');
+  // Estado: {categoria: "valor decimal string"}. Se o mês não tiver metas ainda,
+  // sugere os valores do mês anterior (sugeridas) como ponto de partida.
+  const init={};
+  for(const c of getCats()){
+    const v=(metas&&metas[c]!=null&&metas[c]!=='')?metas[c]:(sugeridas&&sugeridas[c]);
+    init[c]=(v!=null&&v!=='')?String(v):'';
+  }
+  const [vals,setVals]=useState(init);
+  const cats=getCats().slice().sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  const total=Object.values(vals).reduce((s,v)=>s+(parseFloat(String(v).replace(',','.'))||0),0);
+  function set(c,v){setVals(o=>({...o,[c]:v}));}
+  function salvar(){
+    const out={};
+    for(const c of Object.keys(vals)){
+      const n=parseFloat(String(vals[c]).replace(',','.'))||0;
+      if(n>0)out[c]=n;
+    }
+    onSave(out);
+    onClose();
+  }
+  return(
+    <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal">
+        <button className="modal-x" onClick={onClose} aria-label="Fechar">×</button>
+        <div className="modal-handle"></div>
+        <div className="modal-title">🎯 Estimativas · {mlabel(monthKey)}</div>
+        <div style={{padding:'0 20px 12px',fontSize:13,color:'var(--text2)',lineHeight:1.5}}>
+          Defina quanto pretende gastar em cada categoria neste mês. Deixe em branco as que não quer acompanhar.
+        </div>
+        <div style={{padding:'0 20px',maxHeight:'52vh',overflowY:'auto'}}>
+          {cats.map(c=>(
+            <div key={c} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 0',borderBottom:'1px solid var(--border)'}}>
+              <div style={{width:34,height:34,borderRadius:9,background:getCatColor(c)+'22',display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,flexShrink:0}}>{getCatEmoji(c)}</div>
+              <div style={{flex:1,fontSize:13,fontWeight:600,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{c}</div>
+              <div style={{width:120,flexShrink:0}}>
+                <CurrencyInput className="fi" value={vals[c]} onChange={v=>set(c,v)} placeholder="0,00" style={{padding:'8px 10px',fontSize:14,textAlign:'right'}}/>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div style={{padding:'12px 20px 0',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <span style={{fontSize:13,fontWeight:700,color:'var(--text2)'}}>Total estimado</span>
+          <span style={{fontSize:18,fontWeight:800,color:'var(--accent)'}}>{fmt(total)}</span>
+        </div>
+        <button className="btn" onClick={salvar}>Salvar estimativas</button>
+      </div>
+    </div>
+  );
+}
+
+// ── Modal de Retirada de Cofrinho ──────────────────────────────────────────────
+function RetiradaModal({onClose,cofrinho,saldo,onConfirm}){
+  useBackButton(onClose,'retirada');
+  const [valor,setValor]=useState('');
+  const [desc,setDesc]=useState('');
+  const v=parseFloat(String(valor).replace(',','.'))||0;
+  return(
+    <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal">
+        <button className="modal-x" onClick={onClose} aria-label="Fechar">×</button>
+        <div className="modal-handle"></div>
+        <div className="modal-title">🐷 Retirar de {cofrinho}</div>
+        <div style={{padding:'0 20px 8px',fontSize:13,color:'var(--text2)'}}>
+          Saldo disponível: <strong style={{color:'var(--text)'}}>{fmt(saldo)}</strong>
+        </div>
+        <div className="val-wrap">
+          <div className="val-label">Valor a retirar</div>
+          <CurrencyInput value={valor} onChange={setValor}/>
+        </div>
+        <div className="field" style={{paddingTop:16}}>
+          <div className="fl">Descrição (opcional)</div>
+          <input className="fi" type="text" placeholder="Ex: usei para a viagem" value={desc} onChange={e=>setDesc(e.target.value)}/>
+        </div>
+        <div style={{margin:'4px 20px 0',padding:'10px 12px',background:'var(--conj-bg)',borderRadius:10,fontSize:12,color:'var(--text2)',lineHeight:1.5}}>
+          💡 Ao retirar, esse valor volta para o seu “disponível para gastar” do mês atual.
+        </div>
+        <button className="btn" onClick={()=>{if(v>0){onConfirm(v,desc);onClose();}}} disabled={v<=0} style={{background:'var(--amber)'}}>
+          Confirmar retirada
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ── Aba Cofrinhos ──────────────────────────────────────────────────────────────
+function Cofrinhos({cofrinhoData,onWithdraw,onDeposit,onRefresh,syncStatus}){
+  const [retirar,setRetirar]=useState(null); // nome do cofrinho a retirar
+  const [openJar,setOpenJar]=useState(null); // cofrinho com histórico aberto
+
+  // Agrega saldos por cofrinho
+  const jars={};
+  for(const t of cofrinhoData){
+    if(!jars[t.cofrinho])jars[t.cofrinho]={nome:t.cofrinho,saldo:0,dep:0,ret:0,txs:[]};
+    const j=jars[t.cofrinho];
+    if(t.tipo==='Retirada'){j.saldo-=t.valor;j.ret+=t.valor;}
+    else{j.saldo+=t.valor;j.dep+=t.valor;}
+    j.txs.push(t);
+  }
+  // Inclui cofrinhos cadastrados mas ainda sem movimentação
+  for(const nome of getCofrinhoNames()){
+    if(!jars[nome])jars[nome]={nome,saldo:0,dep:0,ret:0,txs:[]};
+  }
+  const jarList=Object.values(jars).sort((a,b)=>b.saldo-a.saldo);
+  const totalGuardado=jarList.reduce((s,j)=>s+j.saldo,0);
+
+  // Evolução acumulada no tempo (todos os cofrinhos somados), por mês
+  const allMonths=[...new Set(cofrinhoData.map(t=>toMk(t.date)).filter(Boolean))].sort();
+  const evoPts=[];
+  let acc=0;
+  for(const m of allMonths){
+    const mdep=cofrinhoData.filter(t=>toMk(t.date)===m&&t.tipo!=='Retirada').reduce((s,t)=>s+t.valor,0);
+    const mret=cofrinhoData.filter(t=>toMk(t.date)===m&&t.tipo==='Retirada').reduce((s,t)=>s+t.valor,0);
+    acc+=mdep-mret;
+    evoPts.push({m,total:acc});
+  }
+
+  return(
+    <div className="screen" style={{padding:'0 16px'}}>
+      <div style={{padding:'calc(14px + var(--safe-t)) 0 10px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div style={{fontSize:22,fontWeight:800}}>🐷 Cofrinhos</div>
+        <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          {syncStatus==='ok'&&<div style={{fontSize:11,color:'var(--green)',fontWeight:700}}>✓ Sync</div>}
+          {onRefresh&&<button onClick={onRefresh} style={{padding:'6px 12px',borderRadius:18,background:'var(--accent-bg)',border:'1.5px solid var(--accent)',color:'var(--accent)',fontSize:11,fontWeight:700}}>⟳ Atualizar</button>}
+        </div>
+      </div>
+
+      <div className="card" style={{marginBottom:12,background:'linear-gradient(135deg,#fff7ed,var(--bg2))',borderLeft:'4px solid var(--amber)'}}>
+        <div style={{fontSize:11,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:4}}>Total guardado</div>
+        <div style={{fontSize:34,fontWeight:800,color:'var(--amber)'}}>{fmt(totalGuardado)}</div>
+        <div style={{fontSize:12,color:'var(--text2)',marginTop:2}}>{jarList.length} cofrinho{jarList.length!==1?'s':''}</div>
+      </div>
+
+      {/* Evolução acumulada */}
+      {evoPts.length>=2&&(()=>{
+        const w=320,h=120,padL=10,padR=10,padT=14,padB=24;
+        const plotW=w-padL-padR,plotH=h-padT-padB;
+        const max=Math.max(1,...evoPts.map(p=>p.total));
+        const xFor=i=>padL+(evoPts.length<=1?plotW/2:(i/(evoPts.length-1))*plotW);
+        const yFor=v=>padT+plotH-(v/max)*plotH;
+        const pts=evoPts.map((p,i)=>({x:xFor(i),y:yFor(p.total),p}));
+        return(
+          <div className="card" style={{marginBottom:12,padding:'16px 14px'}}>
+            <div style={{fontSize:11,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'0.08em',marginBottom:10}}>📈 Evolução do total guardado</div>
+            <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`}>
+              <line x1={padL} y1={padT+plotH} x2={w-padR} y2={padT+plotH} stroke="var(--border)" strokeWidth="1"/>
+              <path d={`M${pts[0].x} ${padT+plotH}${pts.map(p=>` L${p.x} ${p.y}`).join('')}L${pts[pts.length-1].x} ${padT+plotH}Z`} fill="var(--amber)" opacity="0.12"/>
+              <polyline points={pts.map(p=>`${p.x},${p.y}`).join(' ')} fill="none" stroke="var(--amber)" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round"/>
+              {pts.map((p,i)=>(<g key={i}><circle cx={p.x} cy={p.y} r="3" fill="var(--amber)"/><title>{mlabel(p.p.m)}: {fmt(p.p.total)}</title></g>))}
+              {evoPts.map((p,i)=>{const show=evoPts.length<=8||i%Math.ceil(evoPts.length/8)===0||i===evoPts.length-1;if(!show)return null;return<text key={i} x={xFor(i)} y={h-8} textAnchor="middle" fontSize="9" fill="var(--text2)" fontFamily="Plus Jakarta Sans">{mlabelShort(p.m)}</text>;})}
+            </svg>
+          </div>
+        );
+      })()}
+
+      {/* Lista de cofrinhos */}
+      {jarList.map(j=>(
+        <div key={j.nome} className="card" style={{marginBottom:10,padding:'14px'}}>
+          <div style={{display:'flex',alignItems:'center',gap:12}}>
+            <div style={{width:42,height:42,borderRadius:12,background:'var(--amber)'+'22',display:'flex',alignItems:'center',justifyContent:'center',fontSize:20,flexShrink:0}}>🐷</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:15,fontWeight:800,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{j.nome}</div>
+              <div style={{fontSize:11,color:'var(--text2)',marginTop:1}}>guardado {fmtK(j.dep)} · retirado {fmtK(j.ret)}</div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:18,fontWeight:800,color:'var(--amber)'}}>{fmt(j.saldo)}</div>
+            </div>
+          </div>
+          <div style={{display:'flex',gap:8,marginTop:12}}>
+            <button onClick={()=>setRetirar(j.nome)} disabled={j.saldo<=0} style={{flex:1,padding:'9px',borderRadius:10,background:'var(--amber)',color:'#fff',fontSize:13,fontWeight:700,border:'none',opacity:j.saldo<=0?0.4:1}}>Retirar</button>
+            <button onClick={()=>setOpenJar(openJar===j.nome?null:j.nome)} style={{flex:1,padding:'9px',borderRadius:10,background:'var(--bg3)',color:'var(--text2)',fontSize:13,fontWeight:700,border:'1px solid var(--border)'}}>{openJar===j.nome?'Ocultar':'Histórico'}</button>
+          </div>
+          {openJar===j.nome&&(
+            <div style={{marginTop:10,paddingTop:10,borderTop:'1px dashed var(--border2)'}}>
+              {j.txs.length===0&&<div style={{fontSize:12,color:'var(--text3)',textAlign:'center',padding:'8px 0'}}>Sem movimentações ainda</div>}
+              {[...j.txs].sort((a,b)=>b.date>a.date?1:-1).map((t,i)=>(
+                <div key={i} style={{display:'flex',alignItems:'center',gap:8,padding:'6px 0',borderBottom:i<j.txs.length-1?'1px solid var(--border)':'none'}}>
+                  <span style={{fontSize:14}}>{t.tipo==='Retirada'?'⬆️':'⬇️'}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:12,fontWeight:600,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.desc||t.tipo}</div>
+                    <div style={{fontSize:10,color:'var(--text2)'}}>{fmtDate(t.date)}{t.deQuem?' · '+t.deQuem:''}</div>
+                  </div>
+                  <span style={{fontSize:13,fontWeight:700,color:t.tipo==='Retirada'?'var(--red)':'var(--green)'}}>{t.tipo==='Retirada'?'-':'+'}{fmt(t.valor)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+
+      <button onClick={onDeposit} style={{width:'100%',padding:'14px',marginTop:4,borderRadius:14,background:'var(--bg3)',border:'1.5px dashed var(--border2)',color:'var(--amber)',fontSize:14,fontWeight:700}}>
+        ＋ Guardar dinheiro em um cofrinho
+      </button>
+      <div style={{height:8}}></div>
+
+      {retirar&&(
+        <RetiradaModal
+          cofrinho={retirar}
+          saldo={(jars[retirar]||{}).saldo||0}
+          onClose={()=>setRetirar(null)}
+          onConfirm={(v,desc)=>onWithdraw({date:today(),cofrinho:retirar,tipo:'Retirada',valor:v,deQuem:'',desc:desc||`Retirada de ${retirar}`})}
+        />
+      )}
+    </div>
+  );
+}
+
 // ── App Root ──────────────────────────────────────────────────────────────────
 function App(){
   const [tab,setTab]=useState('home');
@@ -2686,6 +3298,7 @@ function App(){
   const [syncStatus,setSyncStatus]=useState('offline');
   const [setupDone,setSetupDone]=useState(()=>!!localStorage.getItem('g_sheet_id'));
   const [budgetData,setBudgetData]=useState({});
+  const [cofrinhoData,setCofrinhoData]=useState([]);
   const [catVersion,setCatVersion]=useState(0); // força re-render ao adicionar categoria
   const [showCatMgr,setShowCatMgr]=useState(false);
 
@@ -2726,17 +3339,29 @@ function App(){
     }
   },[db]);
 
-  useEffect(()=>{if(db){syncFromSheets();syncBudgetsFromSheets();}},[db]);
+  // Sync cofrinhos from Sheets
+  const syncCofrinhosFromSheets=useCallback(async()=>{
+    if(!db)return;
+    try{
+      const txs=await db.getCofrinhos();
+      setCofrinhoData(txs);
+    }catch(e){
+      console.warn('Erro ao carregar cofrinhos:',e);
+    }
+  },[db]);
+
+  useEffect(()=>{if(db){syncFromSheets();syncBudgetsFromSheets();syncCofrinhosFromSheets();}},[db]);
 
   // Auto-sync: poll every 60s + when tab regains focus, so changes added directly
   // in the spreadsheet show up automatically.
   useEffect(()=>{
     if(!db)return;
+    const run=()=>{syncFromSheets();syncBudgetsFromSheets();syncCofrinhosFromSheets();};
     const id=setInterval(()=>{
-      if(document.visibilityState==='visible'){syncFromSheets();syncBudgetsFromSheets();}
+      if(document.visibilityState==='visible'){run();}
     },60*1000);
-    function onVis(){if(document.visibilityState==='visible'){syncFromSheets();syncBudgetsFromSheets();}}
-    function onFocus(){syncFromSheets();syncBudgetsFromSheets();}
+    function onVis(){if(document.visibilityState==='visible'){run();}}
+    function onFocus(){run();}
     document.addEventListener('visibilitychange',onVis);
     window.addEventListener('focus',onFocus);
     return()=>{
@@ -2744,7 +3369,7 @@ function App(){
       document.removeEventListener('visibilitychange',onVis);
       window.removeEventListener('focus',onFocus);
     };
-  },[db,syncFromSheets,syncBudgetsFromSheets]);
+  },[db,syncFromSheets,syncBudgetsFromSheets,syncCofrinhosFromSheets]);
   useEffect(()=>{document.documentElement.setAttribute('data-theme',theme);localStorage.setItem('gastos_theme',theme);},[theme]);
   useEffect(()=>{localStorage.setItem('gastos_pessoa',pessoa);},[pessoa]);
   // Segurança: desabilita versões offline antigas e limpa caches deste site.
@@ -2853,6 +3478,36 @@ function App(){
     }
   }
 
+  // Salva as estimativas (metas) de gasto por categoria do mês
+  async function saveMetasToSheets(monthKey,metas){
+    if(!db){showToast('Faça login no Google para salvar.','err');return;}
+    setSyncStatus('syncing');
+    try{
+      await db.saveMetas(monthKey,metas);
+      await syncBudgetsFromSheets();
+      setSyncStatus('ok');
+      showToast('🎯 Estimativas salvas na planilha!');
+    }catch(e){
+      setSyncStatus('error');
+      showToast('Erro ao salvar estimativas.','err');
+    }
+  }
+
+  // Depósito ou retirada de cofrinho
+  async function handleCofrinho(tx){
+    if(!db){showToast('Faça login no Google para salvar.','err');return;}
+    setSyncStatus('syncing');
+    try{
+      await db.appendCofrinho(tx);
+      await syncCofrinhosFromSheets();
+      setSyncStatus('ok');
+      showToast(tx.tipo==='Retirada'?'🐷 Retirada registrada!':'🐷 Guardado no cofrinho!');
+    }catch(e){
+      setSyncStatus('error');
+      showToast('Erro ao salvar no cofrinho.','err');
+    }
+  }
+
   const debtTotal=calcDebt(data);
 
   if(!setupDone)return(<SetupScreen onDone={()=>setSetupDone(true)}/>);
@@ -2861,14 +3516,16 @@ function App(){
   const tabs=[
     {id:'home',icon:'🏠',label:'Início'},
     {id:'saldos',icon:'⚖️',label:'Saldos'},
+    {id:'cofrinhos',icon:'🐷',label:'Cofrinhos'},
     {id:'historico',icon:'📋',label:'Histórico'},
     {id:'config',icon:'⚙️',label:'Config'},
   ];
 
   return(
     <>
-      {tab==='home'&&<Home data={data} pessoa={pessoa} setPessoa={setPessoa} budgetData={budgetData} setBudgetData={setBudgetData} syncStatus={syncStatus} syncBudgetToSheets={syncBudgetToSheets} onRefresh={syncFromSheets} onAddReceita={()=>{setAddMode('receita');setShowAdd(true);}}/>}
+      {tab==='home'&&<Home data={data} pessoa={pessoa} setPessoa={setPessoa} budgetData={budgetData} setBudgetData={setBudgetData} cofrinhoData={cofrinhoData} syncStatus={syncStatus} syncBudgetToSheets={syncBudgetToSheets} saveMetasToSheets={saveMetasToSheets} onRefresh={syncFromSheets} onAddReceita={()=>{setAddMode('receita');setShowAdd(true);}}/>}
       {tab==='saldos'&&<Saldos data={data} onQuit={(m)=>{setQuitPreMonth(m||null);setShowQuit(true);}} onRefresh={syncFromSheets} syncStatus={syncStatus}/>}
+      {tab==='cofrinhos'&&<Cofrinhos cofrinhoData={cofrinhoData} onWithdraw={handleCofrinho} onDeposit={()=>{setAddMode('cofrinho');setShowAdd(true);}} onRefresh={syncCofrinhosFromSheets} syncStatus={syncStatus}/>}
       {tab==='historico'&&<Historico data={data} pessoa={pessoa} onEdit={setEditEntry} onRefresh={syncFromSheets} syncStatus={syncStatus}/>}
       {tab==='config'&&(
         <div className="screen" style={{padding:'0 16px'}}>
@@ -2954,9 +3611,9 @@ function App(){
               ))}
             </div>
           </div>
-          <div className="card">
+          <div className="card" style={{overflow:'hidden'}}>
             <ST>Dados</ST>
-            <div style={{fontSize:13,color:'var(--text2)',lineHeight:2}}>
+            <div style={{fontSize:13,color:'var(--text2)',lineHeight:2,wordBreak:'break-word',overflowWrap:'anywhere'}}>
               <div>📊 {data.length} lançamentos carregados da planilha</div>
               <div>🔄 Sync: <span style={{color:syncStatus==='ok'?'var(--green)':syncStatus==='syncing'?'var(--accent)':'var(--text3)',fontWeight:700}}>{syncStatus==='ok'?'OK':syncStatus==='syncing'?'Sincronizando...':'Não conectado'}</span></div>
               {(()=>{
@@ -2971,7 +3628,7 @@ function App(){
                     {problemRows.length>0&&(
                       <div style={{marginTop:8,padding:'10px 12px',background:'var(--moz-bg)',borderRadius:10,fontSize:11,color:'var(--moz)',lineHeight:1.5}}>
                         <strong>⚠️ {problemRows.length} lançamento(s) com data não reconhecida:</strong>
-                        <div style={{marginTop:4,fontFamily:'monospace',fontSize:10,color:'var(--text2)'}}>
+                        <div style={{marginTop:4,fontFamily:'monospace',fontSize:10,color:'var(--text2)',wordBreak:'break-word',overflowWrap:'anywhere'}}>
                           {problemRows.slice(0,5).map((r,i)=>(
                             <div key={i}>Linha {r._row}: "{String(r.date)}" — {r.desc}</div>
                           ))}
@@ -2982,7 +3639,7 @@ function App(){
                     {sample.length>0&&(
                       <div style={{marginTop:8,padding:'8px 12px',background:'var(--bg3)',borderRadius:10,fontSize:11,color:'var(--text2)',lineHeight:1.5}}>
                         <strong>🔍 Formato de data lido:</strong>
-                        <div style={{marginTop:2,fontFamily:'monospace',fontSize:10}}>
+                        <div style={{marginTop:2,fontFamily:'monospace',fontSize:10,wordBreak:'break-word',overflowWrap:'anywhere'}}>
                           {sample.map((d,i)=>(
                             <div key={i}>"{String(d)}" → mês {toMk(d)||'(inválido)'}</div>
                           ))}
@@ -2994,6 +3651,7 @@ function App(){
               })()}
             </div>
           </div>
+          <div style={{height:16}}></div>
         </div>
       )}
 
@@ -3024,7 +3682,7 @@ function App(){
         ))}
       </nav>
 
-      {showAdd&&<AddModal onClose={()=>setShowAdd(false)} onSave={handleSave} defaultPessoa={pessoa} debt={debtTotal} data={data} onCatStoreChange={()=>setCatVersion(v=>v+1)} initialMode={addMode}/>}
+      {showAdd&&<AddModal onClose={()=>setShowAdd(false)} onSave={handleSave} onSaveCofrinho={handleCofrinho} defaultPessoa={pessoa} debt={debtTotal} data={data} onCatStoreChange={()=>setCatVersion(v=>v+1)} initialMode={addMode}/>}
       {showQuit&&<QuitacaoModal onClose={()=>{setShowQuit(false);setQuitPreMonth(null);}} onSave={handleSave} debt={debtTotal} data={data} preSelMonth={quitPreMonth}/>}
       {editEntry&&<EditModal entry={editEntry} onClose={()=>setEditEntry(null)} onSave={(updated)=>handleEdit(editEntry,updated)} onDelete={handleDelete} catVersion={catVersion}/>}
       {showCatMgr&&<CategoriasModal onClose={()=>setShowCatMgr(false)} onChange={()=>setCatVersion(v=>v+1)} data={data}/>}
